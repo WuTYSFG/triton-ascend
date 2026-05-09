@@ -45,8 +45,8 @@ private:
     struct MemSlot {
         Value memref;
         Operation *lastWriter = nullptr;
+        Operation *dataSource = nullptr;
         SmallPtrSet<Operation *, INIT_SIZE> pendingReads;
-        bool rejectMayAlias = false;
         explicit MemSlot(Value v) : memref(v) {}
     };
 
@@ -74,6 +74,7 @@ private:
     void restoreSnapshot(Snapshot &&snap);
 
     void recordEdges(Operation *op, ArrayRef<Operation *> defs, ArrayRef<Operation *> preds);
+    AliasResult queryAlias(Value lhs, Value rhs);
 
     Operation *root;
     AliasAnalysis &aa;

@@ -40,9 +40,11 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Region.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/Debug.h"
+#include "bishengir/Dialect/Annotation/IR/Annotation.h"
 
 using namespace mlir;
 static constexpr const char *DEBUG_TYPE = "memory-effects-tracker";
@@ -129,6 +131,7 @@ void MemoryDependenceGraph::analyzeOp(Operation *op)
         return;
     }
 
+    LOG_DEBUG("Analyzing op " << *op << "\n");
     // Step 1: collect outside memory effects
     bool unknown = false;
     SmallVector<MemoryEffects::EffectInstance> effects = collectOuterEffects(op, unknown);
@@ -137,6 +140,14 @@ void MemoryDependenceGraph::analyzeOp(Operation *op)
     SmallVector<Operation *> defs;
     SmallVector<Operation *> preds;
     collectPreds(effects, unknown, defs, preds);
+    LOG_DEBUG("Defs: \n");
+    for (auto def: defs) {
+        LOG_DEBUG(*def << "\n");
+    }
+    LOG_DEBUG("Preds: \n");
+    for (auto pred: preds) {
+        LOG_DEBUG(*pred << "\n");
+    }
 
     // Step 3: extract edges from defs and preds to the graph.
     recordEdges(op, defs, preds);
@@ -168,9 +179,6 @@ void MemoryDependenceGraph::analyzeRegionsOf(Operation *op)
             for (BlockArgument arg : block.getArguments()) {
                 if (isa<BaseMemRefType>(arg.getType())) {
                     auto *slot = getOrCreateSlot(arg);
-                    if (op == root) {
-                        slot->rejectMayAlias = true;
-                    }
                 }
             }
             for (Operation &inner : block) {
@@ -203,6 +211,24 @@ SmallVector<MemoryEffects::EffectInstance> MemoryDependenceGraph::collectOuterEf
     return filtered;
 }
 
+AliasResult MemoryDependenceGraph::queryAlias(Value lhs, Value rhs)
+{
+    auto isFuncEntryArg = [] (const Value &val) -> bool {
+        auto arg = llvm::dyn_cast<BlockArgument>(val);
+        return arg && arg.getOwner()->isEntryBlock();
+    };
+    auto getSource = [] (Value val) -> Value {
+        while (auto viewLike = val.getDefiningOp<ViewLikeOpInterface>()) {
+            val = viewLike.getViewSource();
+        }
+        return val;
+    };
+    if (isFuncEntryArg(getSource(lhs)) && isFuncEntryArg(getSource(rhs))) {
+        return lhs == rhs ? AliasResult::MustAlias : AliasResult::NoAlias;
+    }
+    return aa.alias(lhs, rhs);
+}
+
 SmallVector<MemoryDependenceGraph::MemSlot *> MemoryDependenceGraph::findAliasSlots(Value v)
 {
     SmallVector<MemSlot *> result;
@@ -228,11 +254,8 @@ SmallVector<MemoryDependenceGraph::MemSlot *> MemoryDependenceGraph::findAliasSl
         if (seen.contains(raw) || !raw->memref) {
             continue;
         }
-        auto aliasResult = aa.alias(raw->memref, v);
+        auto aliasResult = queryAlias(raw->memref, v);
         if (aliasResult != AliasResult::NoAlias) {
-            if (raw->rejectMayAlias && aliasResult == AliasResult::MayAlias) {
-                continue;
-            }
             result.push_back(raw);
             seen.insert(raw);
         }
@@ -277,11 +300,11 @@ void MemoryDependenceGraph::collectPreds(ArrayRef<MemoryEffects::EffectInstance>
 
     // defs collects lastWriter only on reads (RAW); preds collects all ordering deps (RAW/WAR/WAW).
     auto addFromSlot = [&](MemSlot *slot, bool isWriteLike) {
+        if (slot->dataSource && !isWriteLike) {
+            defs.insert(slot->dataSource);
+        }
         if (slot->lastWriter) {
             preds.insert(slot->lastWriter); // XAW: we write/read what lastWriter wrote
-            if (!isWriteLike) {
-                defs.insert(slot->lastWriter); // RAW: we read what lastWriter wrote
-            }
         }
         if (isWriteLike) {
             for (Operation *r : slot->pendingReads) {
@@ -328,6 +351,16 @@ void MemoryDependenceGraph::applyEffects(Operation *op, ArrayRef<MemoryEffects::
         return;
     }
 
+    for (auto result: op->getOpResults()) {
+        if (isa<BaseMemRefType>(result.getType())) {
+            if (MemSlot *s = getOrCreateSlot(result)) {
+                s->dataSource = op;
+                s->lastWriter = op;
+                s->pendingReads.clear();
+            }
+        }
+    }
+
     DenseMap<Value, SmallVector<MemSlot *>> cache;
 
     for (const auto &e : effects) {
@@ -343,11 +376,16 @@ void MemoryDependenceGraph::applyEffects(Operation *op, ArrayRef<MemoryEffects::
         Value v = e.getValue();
         if (isa<MemoryEffects::Allocate>(e.getEffect())) {
             if (MemSlot *s = getOrCreateSlot(v)) {
+                s->dataSource = op;
                 s->lastWriter = op;
                 s->pendingReads.clear();
             }
         } else if (isa<MemoryEffects::Write>(e.getEffect())) {
             for (MemSlot *s : resolveAliasSlots(v, cache)) {
+                // annotation::MarkOp, no data produced, is marked with Mem::Write
+                if (!isa<annotation::MarkOp>(op)) {
+                    s->dataSource = op;
+                }
                 s->lastWriter = op;
                 s->pendingReads.clear();
             }
