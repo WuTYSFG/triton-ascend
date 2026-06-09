@@ -1199,6 +1199,23 @@ void BlockDataParser::rewriteAddPtr(
     inferedSize *= sizeConst.value();
   }
 
+  auto &offsets = data.getOffsetsRef();
+  for (size_t i = 0; i < offsets.size(); ++i) {
+    if (auto constVal = getConstantIntValue(offsets[i])) {
+      if (constVal.value() < 0) {
+        LLVM_DEBUG({
+          llvm::dbgs() << "[NegOffsetElim] Detected negative offset: "
+                       << constVal.value() << " at dim " << i << "\n";
+        });
+
+        Value zero = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 0);
+        Value negOffsetVal = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), constVal.value());
+        Value newOffset = rewriter.create<arith::SubIOp>(op.getLoc(), zero, negOffsetVal);
+        offsets[i] = newOffset;
+      }
+    }
+  }
+
   if (auto intToPtrOp =
           dyn_cast<triton::IntToPtrOp>(data.getSourceRef().getDefiningOp())) {
     auto rtype = cast<triton::PointerType>(intToPtrOp.getResult().getType());
