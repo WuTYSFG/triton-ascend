@@ -134,7 +134,9 @@ private:
                                                 int consumerBlockId);
 
     bool isControlFlowOp(mlir::Operation *op);
-    bool isValidTensorForDependency(mlir::Value value);
+    bool isCubeOrVectorOp(mlir::Operation *op);
+    bool isValidShapeForDependency(mlir::Value value);
+    bool isValidValueForDependency(mlir::Value value);
     bool isOuterOpArg(mlir::Value value);
     void processIterArgDependencies();
     llvm::SmallVector<mlir::Operation *> collectDiffCoreTypeUsers(

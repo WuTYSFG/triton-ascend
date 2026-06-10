@@ -197,8 +197,8 @@ static std::optional<TileSeed> findSeed(ModuleOp moduleOp) {
                 cmp.getLhs() != add.getResult())
               continue;
             int64_t b = 0;
-            if (!getConstInt(cmp.getRhs(), b) || b <= T)
-              continue;
+            if (!getConstInt(cmp.getRhs(), b) || b <= 0)
+              return;  // unsafe dynamic/empty mask; abandon this pid entirely
             // A partial-tile mask (problem axis not a multiple of T) means the
             // last tile is only partly valid: dropping it would read/write OOB,
             // and a lifted 2D mask like `(pid*H+h)*T + t < BOUND` is

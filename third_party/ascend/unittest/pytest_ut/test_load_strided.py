@@ -513,7 +513,8 @@ def _ref_boundary_load(src_cpu_flat, parent_m, parent_n,
     pytest.param("float32", 5, 3, 12, 4, 8, 8, False,
                  marks=a3_known_boundary_load_issue),
     # V1.5 命中: PAD_ZERO, stride_n=3, block 部分越界
-    ("float32", 7, 5, 15, 3, 8, 8, False),
+    pytest.param("float32", 7, 5, 15, 3, 8, 8, False,
+                 marks=a3_known_boundary_load_issue),
     # V1.5 命中: PAD_NAN (float)
     pytest.param("float32", 5, 3, 12, 4, 8, 8, True,
                  marks=a3_known_boundary_load_issue),

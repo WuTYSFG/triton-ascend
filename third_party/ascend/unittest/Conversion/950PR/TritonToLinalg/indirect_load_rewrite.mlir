@@ -25,6 +25,38 @@ module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
 }
 
 // -----
+// V1 rank-1 hit (AddPtr, static power-of-two stride 4, masked single tile):
+// The structured strided-copy route would create a dynamic boundary size that
+// can become zero for over-launched programs. Route to indirect_load instead.
+// CHECK-LABEL: func.func @addptr_stride4_masked_single_tile
+// CHECK: call @triton_indirect_load(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (memref<?xf16>, tensor<1024xi64>, tensor<1024xi1>, tensor<1024xf16>) -> tensor<1024xf16>
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
+  tt.func public @addptr_stride4_masked_single_tile(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32},
+                                                    %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}) {
+    %zero = arith.constant dense<0.000000e+00> : tensor<1024xf16>
+    %one = arith.constant dense<1.000000e+00> : tensor<1024xf16>
+    %c4 = arith.constant dense<4> : tensor<1024xi32>
+    %bound = arith.constant dense<1024> : tensor<1024xi32>
+    %c1024_i32 = arith.constant 1024 : i32
+    %pid = tt.get_program_id x : i32
+    %tile_base = arith.muli %pid, %c1024_i32 : i32
+    %range = tt.make_range {end = 1024 : i32, start = 0 : i32} : tensor<1024xi32>
+    %base_splat = tt.splat %tile_base : i32 -> tensor<1024xi32>
+    %idx = arith.addi %base_splat, %range : tensor<1024xi32>
+    %mask = arith.cmpi slt, %idx, %bound : tensor<1024xi32>
+    %src_offsets = arith.muli %idx, %c4 : tensor<1024xi32>
+    %src_base = tt.splat %arg0 : !tt.ptr<f16> -> tensor<1024x!tt.ptr<f16>>
+    %src_ptr = tt.addptr %src_base, %src_offsets : tensor<1024x!tt.ptr<f16>>, tensor<1024xi32>
+    %val = tt.load %src_ptr, %mask, %zero : tensor<1024x!tt.ptr<f16>>
+    %out = arith.addf %val, %one : tensor<1024xf16>
+    %dst_base = tt.splat %arg1 : !tt.ptr<f16> -> tensor<1024x!tt.ptr<f16>>
+    %dst_ptr = tt.addptr %dst_base, %idx : tensor<1024x!tt.ptr<f16>>, tensor<1024xi32>
+    tt.store %dst_ptr, %out, %mask : tensor<1024x!tt.ptr<f16>>
+    tt.return
+  }
+}
+
+// -----
 // V1 rank-1 hit (AddPtr, static non-power-of-two stride 3):
 // tt.addptr(splat ptr, arange*3) -> should become tt.indirect_load.
 // CHECK-LABEL: func.func @addptr_stride3_1d
@@ -63,6 +95,30 @@ module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
     %5 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
     %6 = tt.addptr %5, %0 : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
     tt.store %6, %4 : tensor<256x!tt.ptr<f32>>
+    tt.return
+  }
+}
+
+// -----
+// V2 rank-1 hit (AddPtr store, scalar base AddPtr + dynamic stride):
+// Fold the scalar base offset into the tensor offsets so indirect_store keeps
+// the original memref<?xf32> base instead of a size-1 reinterpret_cast view.
+// CHECK-LABEL: func.func @addptr_dynamic_stride_store_scalar_base
+// CHECK-NOT: memref<1xf32
+// CHECK: call @triton_indirect_store(%{{.*}}, %{{.*}}, %{{.*}}) : (memref<?xf32>, tensor<32xi64>, tensor<32xf32>) -> ()
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
+  tt.func public @addptr_dynamic_stride_store_scalar_base(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32},
+                                                          %base_offset: i64,
+                                                          %stride: i64) {
+    %cst = arith.constant dense<1.000000e+00> : tensor<32xf32>
+    %range_i32 = tt.make_range {end = 32 : i32, start = 0 : i32} : tensor<32xi32>
+    %range_i64 = arith.extsi %range_i32 : tensor<32xi32> to tensor<32xi64>
+    %stride_splat = tt.splat %stride : i64 -> tensor<32xi64>
+    %offsets = arith.muli %range_i64, %stride_splat : tensor<32xi64>
+    %scalar_base = tt.addptr %arg0, %base_offset : !tt.ptr<f32>, i64
+    %base = tt.splat %scalar_base : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+    %ptr = tt.addptr %base, %offsets : tensor<32x!tt.ptr<f32>>, tensor<32xi64>
+    tt.store %ptr, %cst : tensor<32x!tt.ptr<f32>>
     tt.return
   }
 }

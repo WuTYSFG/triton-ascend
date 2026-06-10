@@ -79,6 +79,53 @@ static bool isStaticConst(Value v) {
     return false;
 }
 
+static std::optional<int64_t> getStaticConstInt(Value v) {
+    IntegerAttr scalarAttr;
+    if (matchPattern(v, m_Constant(&scalarAttr)))
+        return scalarAttr.getValue().getSExtValue();
+    DenseElementsAttr denseAttr;
+    if (matchPattern(v, m_Constant(&denseAttr)) && denseAttr.isSplat() &&
+        denseAttr.getElementType().isInteger())
+        return denseAttr.getSplatValue<llvm::APInt>().getSExtValue();
+    if (auto splatOp = v.getDefiningOp<triton::SplatOp>())
+        return getStaticConstInt(splatOp.getSrc());
+    return std::nullopt;
+}
+
+static std::optional<int64_t> getStaticMaskUpperBound(Value mask) {
+    if (!mask)
+        return std::nullopt;
+    if (auto cmp = mask.getDefiningOp<arith::CmpIOp>()) {
+        auto bound = getStaticConstInt(cmp.getRhs());
+        if (!bound)
+            return std::nullopt;
+        if (cmp.getPredicate() == arith::CmpIPredicate::slt)
+            return *bound;
+        if (cmp.getPredicate() == arith::CmpIPredicate::sle)
+            return *bound + 1;
+        return std::nullopt;
+    }
+    if (auto andOp = mask.getDefiningOp<arith::AndIOp>()) {
+        auto lhsBound = getStaticMaskUpperBound(andOp.getLhs());
+        auto rhsBound = getStaticMaskUpperBound(andOp.getRhs());
+        if (lhsBound && rhsBound)
+            return std::min(*lhsBound, *rhsBound);
+        return lhsBound ? lhsBound : rhsBound;
+    }
+    return std::nullopt;
+}
+
+static bool shouldRouteMaskedSingleTilePow2ToIndirect(
+    Value mask, RankedTensorType tensorType) {
+    if (!mask || tensorType.getRank() != 1)
+        return false;
+    int64_t blockSize = tensorType.getShape()[0];
+    if (ShapedType::isDynamic(blockSize))
+        return false;
+    auto upperBound = getStaticMaskUpperBound(mask);
+    return upperBound && *upperBound <= blockSize;
+}
+
 // Lightweight pre-check: walks the offset's defining-op tree (bounded depth,
 // staying within tensor-typed values) looking for any arith.muli whose result
 // is a tensor and either one operand is a static constant with |c| > 1, or the
@@ -177,6 +224,44 @@ static Value ensureI64Scalar(Value v, Location loc, PatternRewriter &rewriter) {
         return rewriter.create<arith::IndexCastOp>(loc, rewriter.getI64Type(), v);
     }
     return Value();  // Unsupported scalar type.
+}
+
+static LogicalResult unwrapScalarAddPtrChain(Value scalarPtr, Value &src,
+                                             Value &scalarOffset,
+                                             Location loc,
+                                             PatternRewriter &rewriter) {
+    src = scalarPtr;
+    scalarOffset = Value();
+    while (auto addPtrOp = src.getDefiningOp<triton::AddPtrOp>()) {
+        if (isa<RankedTensorType>(addPtrOp.getPtr().getType()))
+            break;
+        if (!scalarOffset)
+            scalarOffset = rewriter.create<arith::ConstantOp>(
+                loc, rewriter.getI64IntegerAttr(0));
+        Value offset = ensureI64Scalar(addPtrOp.getOffset(), loc, rewriter);
+        if (!offset)
+            return failure();
+        scalarOffset =
+            rewriter.create<arith::AddIOp>(loc, scalarOffset, offset);
+        src = addPtrOp.getPtr();
+    }
+    return success();
+}
+
+static Value addScalarOffsetToTensor(Value offsetTensor, Value scalarOffset,
+                                     Location loc,
+                                     PatternRewriter &rewriter) {
+    if (!scalarOffset)
+        return offsetTensor;
+    APInt scalarOffsetConst;
+    if (matchPattern(scalarOffset, m_ConstantInt(&scalarOffsetConst)) &&
+        scalarOffsetConst.isZero())
+        return offsetTensor;
+    auto tensorType = cast<RankedTensorType>(offsetTensor.getType());
+    Value scalarOffsetTensor =
+        rewriter.create<triton::SplatOp>(loc, tensorType, scalarOffset);
+    return rewriter.create<arith::AddIOp>(loc, offsetTensor,
+                                          scalarOffsetTensor);
 }
 
 // Expand a 1D tensor `v` of length `targetShape[axis]` into a rank-N tensor
@@ -313,16 +398,21 @@ static LogicalResult tryRewriteAddPtrLoad(triton::LoadOp op,
     ptrState.analyzePermute();
     if (ptrState.isPermuted) return markInspectedAndReturn();
 
-    // Stride dispatch (mirrors tryRewriteBlockPtrLoad): only DECLINE for static
+    // Stride dispatch (mirrors tryRewriteBlockPtrLoad): DECLINE for most static
     // power-of-two strides (-> strided DMA / deinterleave); non-power-of-two
-    // static and dynamic strides fall through to SIMT indirect.
+    // static, dynamic, and masked single-tile pow2 strides fall through to SIMT
+    // indirect.
     auto lastStrideOpt = getConstantIntValue(ptrState.stateInfo.back().stride);
     int64_t lastStride = -1;  // -1 == dynamic
     if (lastStrideOpt.has_value()) {
         lastStride = std::abs(lastStrideOpt.value());
         if (lastStride <= 1) return markInspectedAndReturn();
-        if (lastStride == 2) return markInspectedAndReturn();  // even -> deinterleave; odd -> strided DMA
-        if ((lastStride & (lastStride - 1)) == 0)
+        bool routeMaskedPow2ToIndirect =
+            shouldRouteMaskedSingleTilePow2ToIndirect(op.getMask(), resultType);
+        if (lastStride == 2 && !routeMaskedPow2ToIndirect)
+            return markInspectedAndReturn();  // even -> deinterleave; odd -> strided DMA
+        if ((lastStride & (lastStride - 1)) == 0 &&
+            !routeMaskedPow2ToIndirect)
             return markInspectedAndReturn();  // power-of-two >= 4 -> strided DMA
     }
 
@@ -330,8 +420,16 @@ static LogicalResult tryRewriteAddPtrLoad(triton::LoadOp op,
         ensureI64OffsetTensor(addPtrOp.getOffset(), loc, rewriter);
     if (!offsetTensor) return failure();
 
+    Value src;
+    Value scalarOffset;
+    if (failed(unwrapScalarAddPtrChain(scalarBase, src, scalarOffset, loc,
+                                       rewriter)))
+        return markInspectedAndReturn();
+    offsetTensor =
+        addScalarOffsetToTensor(offsetTensor, scalarOffset, loc, rewriter);
+
     auto indirectLoad = rewriter.create<triton::ascend::IndirectLoadOp>(
-        loc, resultType, scalarBase, offsetTensor, op.getMask(), op.getOther());
+        loc, resultType, src, offsetTensor, op.getMask(), op.getOther());
     indirectLoad->setAttr(RewrittenByStridedLoadStoreRewriteTAG,
                           UnitAttr::get(rewriter.getContext()));
 
@@ -542,16 +640,21 @@ static LogicalResult tryRewriteAddPtrStore(triton::StoreOp op,
     ptrState.analyzePermute();
     if (ptrState.isPermuted) return markInspectedAndReturn();
 
-    // Stride dispatch (mirrors tryRewriteBlockPtrLoad): only DECLINE for static
+    // Stride dispatch (mirrors tryRewriteBlockPtrLoad): DECLINE for most static
     // power-of-two strides (-> strided DMA / deinterleave); non-power-of-two
-    // static and dynamic strides fall through to SIMT indirect.
+    // static, dynamic, and masked single-tile pow2 strides fall through to SIMT
+    // indirect.
     auto lastStrideOpt = getConstantIntValue(ptrState.stateInfo.back().stride);
     int64_t lastStride = -1;  // -1 == dynamic
     if (lastStrideOpt.has_value()) {
         lastStride = std::abs(lastStrideOpt.value());
         if (lastStride <= 1) return markInspectedAndReturn();
-        if (lastStride == 2) return markInspectedAndReturn();  // even -> deinterleave; odd -> strided DMA
-        if ((lastStride & (lastStride - 1)) == 0)
+        bool routeMaskedPow2ToIndirect =
+            shouldRouteMaskedSingleTilePow2ToIndirect(op.getMask(), valueType);
+        if (lastStride == 2 && !routeMaskedPow2ToIndirect)
+            return markInspectedAndReturn();  // even -> deinterleave; odd -> strided DMA
+        if ((lastStride & (lastStride - 1)) == 0 &&
+            !routeMaskedPow2ToIndirect)
             return markInspectedAndReturn();  // power-of-two >= 4 -> strided DMA
     }
 
@@ -559,8 +662,16 @@ static LogicalResult tryRewriteAddPtrStore(triton::StoreOp op,
         ensureI64OffsetTensor(addPtrOp.getOffset(), loc, rewriter);
     if (!offsetTensor) return failure();
 
+    Value src;
+    Value scalarOffset;
+    if (failed(unwrapScalarAddPtrChain(scalarBase, src, scalarOffset, loc,
+                                       rewriter)))
+        return markInspectedAndReturn();
+    offsetTensor =
+        addScalarOffsetToTensor(offsetTensor, scalarOffset, loc, rewriter);
+
     auto indirectStore = rewriter.create<triton::ascend::IndirectStoreOp>(
-        loc, scalarBase, offsetTensor, op.getValue(), op.getMask());
+        loc, src, offsetTensor, op.getValue(), op.getMask());
     indirectStore->setAttr(RewrittenByStridedLoadStoreRewriteTAG,
                            UnitAttr::get(rewriter.getContext()));
 
