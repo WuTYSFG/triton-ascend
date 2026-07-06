@@ -1710,15 +1710,25 @@ LogicalResult ExternElementwiseClOpConverter::matchAndRewrite(
       for (auto newOut : op->getResults()) {
         originalOutputTypes.push_back(newOut.getType());
         auto tensorType = dyn_cast<RankedTensorType>(newOut.getType());
-        Type elemType = tensorType.getElementType();
+        Type elemType = tensorType ? tensorType.getElementType() : newOut.getType();
         if (elemType.isInteger(1)) {
           elemType = rewriter.getI32Type();
         }
-        auto src = rewriter.create<tensor::EmptyOp>(
-              op->getLoc(), tensorType.getShape(), elemType);
+        SmallVector<int64_t> scalarShape = {1};
+        ArrayRef<int64_t> shape =
+            tensorType ? tensorType.getShape() : ArrayRef<int64_t>(scalarShape);
+        auto src = rewriter.create<tensor::EmptyOp>(op->getLoc(), shape, elemType);
         newOuts.push_back(src);
       }
-      ValueRange inputs{op->getOperands()};
+      SmallVector<Value> srcs;
+      for (auto src : op->getOperands()) {
+        if (!isa<RankedTensorType>(src.getType())) {
+          src = rewriter.create<tensor::FromElementsOp>(
+              op.getLoc(), RankedTensorType::get({(int64_t)1}, src.getType()), src);
+        }
+        srcs.push_back(src);
+      }
+      ValueRange inputs{srcs};
       ValueRange outputs{newOuts};
       ValueRange temp_buffers{};
       TypeRange res_types{outputs};
@@ -1737,6 +1747,14 @@ LogicalResult ExternElementwiseClOpConverter::matchAndRewrite(
       SmallVector<Value> finalResults;
       for (auto [customResult, origType] : llvm::zip(customRes.getResults(), originalOutputTypes)) {
         auto origTensorType = dyn_cast<RankedTensorType>(origType);
+        if (!origTensorType) {
+          // original result is a scalar: extract element 0 from the 1x1
+          // tensor that hivm::CustomOp produced
+          auto zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+          finalResults.push_back(
+              rewriter.create<tensor::ExtractOp>(loc, customResult, ValueRange{zero}));
+          continue;
+        }
         Type targetElemType = rewriter.getI8Type();
         Type targetTensorType = RankedTensorType::get(
           origTensorType.getShape(),
