@@ -189,7 +189,7 @@ def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
             auto_blockify_size = 1
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        ascend.passes.ttir.add_auto_blockify(pm, auto_blockify_size)
+        # ascend.passes.ttir.add_auto_blockify(pm, auto_blockify_size)
 
         ascend.passes.ttir.add_triton_control_flow_opt(pm)
         if (metadata["add_auto_scheduling"]):
