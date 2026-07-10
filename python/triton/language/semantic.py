@@ -1065,8 +1065,6 @@ class TritonSemantic(Generic[TensorTy]):
         # Check `boundary_check` argument
         boundary_check = self._canonicalize_boundary_check(boundary_check, dst_ty.get_block_shapes())
 
-        if boundary_check and padding is None:
-            padding = ir.PADDING_OPTION.PAD_ZERO
         # Build IR
         return self.tensor(
             self.builder.create_tensor_pointer_load(ptr.handle, boundary_check, padding, cache, eviction, is_volatile),
@@ -1084,12 +1082,7 @@ class TritonSemantic(Generic[TensorTy]):
             raise ValueError("`padding_option` or `boundary_check` argument is not supported for loading a tensor of"
                              "pointers or loading a scalar. Because the compiler does not know the boundary; please "
                              "use block pointers (defined by `make_block_ptr`) instead")
-        if mask is not None and other is None:
-            # Get element type to determine default padding value
-            elt_ty = ptr.type.scalar.element_ty
-            # Use 0.0 for floating point types, 0 for integer types
-            default_value = 0.0 if elt_ty.is_floating() else 0
-            other = self.to_tensor(default_value)
+
         # For a pointer of scalar, check the type of `mask` and `other`
         if not ptr.type.is_block():
             if mask and mask.type.is_block():
