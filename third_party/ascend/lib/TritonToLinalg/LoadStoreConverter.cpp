@@ -350,31 +350,31 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
     // handle the padding
     auto padding = op.getPadding();
     SmallVector<OpFoldResult> srcOffsets(boundarySizes.size(), rewriter.getIndexAttr(0));
-    SmallVector<OpFoldResult> dstOffsets;
-    if (makeTensorPtrOp) {
-      auto zeroVal = rewriter.createOrFold<arith::ConstantOp>(loc, rewriter.getI32IntegerAttr(0));
-      for (auto [idx, offVal] : llvm::enumerate(makeTensorPtrOp.getOffsets())) {
-        if (llvm::find(boundaryCheck, idx) == boundaryCheck.end()) {
-          dstOffsets.push_back(srcOffsets[idx]);
-          continue;
-        }
-        Value offset = rewriter.createOrFold<arith::SubIOp>(loc, zeroVal, offVal);
-        Value size = getValueOrCreateConstantIndexOp(rewriter, loc, boundarySizes[idx]);
-        offset = rewriter.createOrFold<arith::MaxSIOp>(loc, offset, zeroVal);
-        offset = rewriter.createOrFold<arith::IndexCastOp>(loc, rewriter.getIndexType(), offset);
-        OpFoldResult ofr;
-        if (auto constOp = offset.getDefiningOp<arith::ConstantOp>()) {
-          ofr = constOp.getValue();
-        } else {
-          ofr = offset;
-        }
-        ofr = minOpFoldResult(ofr, size, loc, rewriter);
-        boundarySizes[idx] = subOpFoldResult(size, ofr, loc, rewriter);
-        dstOffsets.push_back(ofr);
-      }
-    } else {
-      dstOffsets = srcOffsets;
-    }
+    SmallVector<OpFoldResult> dstOffsets(boundarySizes.size(), rewriter.getIndexAttr(0));
+    // if (makeTensorPtrOp) {
+    //   auto zeroVal = rewriter.createOrFold<arith::ConstantOp>(loc, rewriter.getI32IntegerAttr(0));
+    //   for (auto [idx, offVal] : llvm::enumerate(makeTensorPtrOp.getOffsets())) {
+    //     if (llvm::find(boundaryCheck, idx) == boundaryCheck.end()) {
+    //       dstOffsets.push_back(srcOffsets[idx]);
+    //       continue;
+    //     }
+    //     Value offset = rewriter.createOrFold<arith::SubIOp>(loc, zeroVal, offVal);
+    //     Value size = getValueOrCreateConstantIndexOp(rewriter, loc, boundarySizes[idx]);
+    //     offset = rewriter.createOrFold<arith::MaxSIOp>(loc, offset, zeroVal);
+    //     offset = rewriter.createOrFold<arith::IndexCastOp>(loc, rewriter.getIndexType(), offset);
+    //     OpFoldResult ofr;
+    //     if (auto constOp = offset.getDefiningOp<arith::ConstantOp>()) {
+    //       ofr = constOp.getValue();
+    //     } else {
+    //       ofr = offset;
+    //     }
+    //     ofr = minOpFoldResult(ofr, size, loc, rewriter);
+    //     boundarySizes[idx] = subOpFoldResult(size, ofr, loc, rewriter);
+    //     dstOffsets.push_back(ofr);
+    //   }
+    // } else {
+    //   dstOffsets = srcOffsets;
+    // }
     if (padding.has_value()) {
       TypedAttr padAttr = rewriter.getZeroAttr(memRefElementType);
       // triton already ensure only NAN and ZERO are passed in
