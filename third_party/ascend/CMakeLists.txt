@@ -9,6 +9,10 @@ set(ASCENDNPU_IR_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/AscendNPU-IR" CACHE PATH
     "Path to AscendNPU-IR source root")
 set(ASCENDNPU_IR_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/AscendNPU-IR")
 
+set(TRITON_DISTRIBUTED_ASCEND_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Triton-distributed-ascend" CACHE PATH
+    "Path to Triton-distributed-ascend source root")
+set(TRITON_DISTRIBUTED_ASCEND_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/Triton-distributed-ascend")
+
 set(BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES ON)
 set(BISHENGIR_BUILD_STANDALONE_IR_ONLY ON)
 
@@ -19,6 +23,27 @@ set_property(DIRECTORY PROPERTY RULE_LAUNCH_COMPILE "")
 set_property(DIRECTORY PROPERTY RULE_LAUNCH_LINK "")
 
 add_subdirectory(${ASCENDNPU_IR_SRC_DIR} ${ASCENDNPU_IR_BINARY_DIR})
+if(TRITON_BUILD_DISTRIBUTED)
+  if(NOT EXISTS "${TRITON_DISTRIBUTED_ASCEND_SRC_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "Triton-Distributed submodule is not initialized: ${TRITON_DISTRIBUTED_ASCEND_SRC_DIR}")
+  endif()
+
+  include_directories(${TRITON_DISTRIBUTED_ASCEND_SRC_DIR}/include)
+  include_directories(${TRITON_DISTRIBUTED_ASCEND_BINARY_DIR}/include)
+  add_subdirectory(${TRITON_DISTRIBUTED_ASCEND_SRC_DIR}/include/TritonDistributed
+                   ${TRITON_DISTRIBUTED_ASCEND_BINARY_DIR}/include/TritonDistributed)
+  add_subdirectory(${TRITON_DISTRIBUTED_ASCEND_SRC_DIR}/lib
+                   ${TRITON_DISTRIBUTED_ASCEND_BINARY_DIR}/lib)
+
+  if(TRITON_BUILD_PYTHON_MODULE)
+    set(PYTHON_DIST_SRC_PATH ${TRITON_DISTRIBUTED_ASCEND_SRC_DIR}/python/src)
+    add_triton_plugin(TritonDistributed
+      ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
+      ${PYTHON_DIST_SRC_PATH}/ascend_passes.cc
+      ${PYTHON_DIST_SRC_PATH}/ir.cc)
+    target_link_libraries(TritonDistributed PRIVATE DistributedIR Python3::Module pybind11::headers)
+  endif()
+endif()
 
 # restore properties
 set_property(DIRECTORY PROPERTY RULE_LAUNCH_COMPILE ${_saved_launch_compile})

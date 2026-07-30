@@ -32,7 +32,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          submodules: "true"
+          submodules: false
+
+      - name: Init Triton-Distributed submodule (non-recursive)
+        run: |
+          git submodule update --init third_party/ascend/Triton-distributed-ascend
+          git -C third_party/ascend/Triton-distributed-ascend config submodule.3rdparty/triton-ascend.update none
+          git -C third_party/ascend/Triton-distributed-ascend config submodule.3rdparty/triton.update none
+          git -C third_party/ascend/Triton-distributed-ascend config submodule.3rdparty/mori.update none
+          git -C third_party/ascend/Triton-distributed-ascend config submodule.3rdparty/rocshmem.update none
+          git -C third_party/ascend/Triton-distributed-ascend config submodule.3rdparty/shmem.update none
+          git -C third_party/ascend/Triton-distributed-ascend config submodule.3rdparty/cutlass.update none
 
       - name: Add git safe directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"

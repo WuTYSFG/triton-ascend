@@ -300,7 +300,14 @@ class CodeGenerator(ast.NodeVisitor):
             self.semantic = GluonSemantic(self.builder)
         else:
             from triton.language.semantic import TritonSemantic
-            self.builder = ir.builder(context)
+            try:
+                from .._C.libtriton import distributed
+            except ImportError:
+                distributed = None
+            if distributed is not None:
+                self.builder = distributed.ir.DistributedOpBuilder(context)
+            else:
+                self.builder = ir.builder(context)
             self.semantic = TritonSemantic(self.builder)
 
         self.name_loc_as_prefix = None

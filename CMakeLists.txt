@@ -18,9 +18,15 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # Options
 option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" OFF)
 option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" ON)
+option(TRITON_BUILD_DISTRIBUTED "Build Triton Distributed" OFF)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
+
+if(TRITON_BUILD_DISTRIBUTED)
+  set(TRITON_USE_ASCEND ON)
+  add_compile_definitions(TRITON_USE_ASCEND=1)
+endif()
 
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
@@ -180,6 +186,10 @@ if(TRITON_BUILD_PYTHON_MODULE)
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
+
+  if(TRITON_BUILD_DISTRIBUTED)
+    list(APPEND TRITON_PLUGIN_NAMES "distributed")
+  endif()
 
   if (TRITON_BUILD_PROTON)
     add_subdirectory(third_party/proton)
