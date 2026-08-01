@@ -14,6 +14,10 @@ from triton.extension.buffer.language.builder import setup_unified_builder_with_
 
 from .. import language
 from .._C.libtriton import ir, buffer_ir
+try:
+    from .._C.libtriton import distributed
+except ImportError:
+    distributed = None
 from .._C.libtriton.ascend import ir as ascend_ir
 from ..language import constexpr, tensor, str_to_ty
 from ..language.core import _unwrap_if_constexpr, nv_tma_desc_type, _value
@@ -212,10 +216,13 @@ class CodeGenerator(ast.NodeVisitor):
                  noinline=False, file_name: Optional[str] = None, begin_line=0):
         self.context = context
         # Only NPUOptions has force_simt_only attribute, so check for NPU backend
-        if hasattr(options, "force_simt_only") and options.force_simt_only:
-            self.builder = ir.builder(context, compile_mode="simt")
+        if distributed is not None:
+            self.builder = distributed.ir.DistributedOpBuilder(context)
         else:
-            self.builder = ir.builder(context, compile_mode="simd")
+            if hasattr(options, "force_simt_only") and options.force_simt_only:
+                self.builder = ir.builder(context, compile_mode="simt")
+            else:
+                self.builder = ir.builder(context, compile_mode="simd")
         self.file_name = file_name
         # node.lineno starts from 1, so we need to subtract 1
         self.begin_line = begin_line - 1

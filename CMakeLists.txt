@@ -26,8 +26,14 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/safe_compile.cmake)
 option(TRITON_BUILD_TUTORIALS "Build C++ Triton tutorials" ON)
 option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" OFF)
 option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" ON)
+option(TRITON_BUILD_DISTRIBUTED "Build Triton Distributed" OFF)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
+
+if(TRITON_BUILD_DISTRIBUTED)
+  set(TRITON_BUILD_ASCEND ON)
+  add_compile_definitions(TRITON_BUILD_ASCEND=1)
+endif()
 
 # Ensure Python3 vars are set correctly
 # used conditionally in this file and by lit tests
@@ -200,6 +206,10 @@ if(TRITON_BUILD_PYTHON_MODULE)
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
+
+  if(TRITON_BUILD_DISTRIBUTED)
+    list(APPEND TRITON_PLUGIN_NAMES "distributed")
+  endif()
 
   if (TRITON_BUILD_PROTON)
     add_subdirectory(third_party/proton)

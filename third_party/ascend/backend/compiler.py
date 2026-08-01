@@ -33,6 +33,10 @@ from types import ModuleType
 from typing import Any, Dict, Optional, Tuple, Union
 
 from triton._C.libtriton import ir, passes, ascend
+try:
+    from triton._C.libtriton import distributed
+except ImportError:
+    distributed = None
 from triton.backends.ascend.utils import (
     _check_bishengir_api_change,
     _check_bishengir_able_save_ir,
@@ -177,6 +181,8 @@ def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
             auto_blockify_size = 1
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
+        if distributed is not None:
+            distributed.ascend_passes.ttgpuir.add_convert_triton_distributed_to_hivm(pm)
         ascend.passes.ttir.add_auto_blockify(
             pm,
             auto_blockify_size
@@ -1200,6 +1206,8 @@ class AscendBackend(BaseBackend):
         return codegen_fns
 
     def load_dialects(self, ctx):
+        if distributed is not None:
+            distributed.ir.load_dialects(ctx)
         ascend.load_dialects(ctx)
 
     def get_attrs_descriptor(self, params, args):
