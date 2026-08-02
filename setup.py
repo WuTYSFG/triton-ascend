@@ -1178,7 +1178,7 @@ setup(
     long_description=long_description,
     packages=list(get_packages()),
     package_dir=dict(get_package_dirs()),
-    package_data=package_data or None,
+    package_data=package_data,
     entry_points=get_entry_points(),
     include_package_data=True,
     ext_modules=[CMakeExtension("triton", "triton/_C/")],
