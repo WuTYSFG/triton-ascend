@@ -246,6 +246,7 @@ class NPUDriver(DriverBase):
         return ty_to_cpp(ty)
 
     def get_current_target(self):
+        import torch
         backend = "npu"
         env_target = get_ascend_arch_from_env()
         if env_target:
@@ -259,7 +260,8 @@ class NPUDriver(DriverBase):
         """
         Get current device
         """
-        return get_backend_func("get_current_device")
+        import torch
+        return torch.npu.current_device()
 
     def get_active_torch_device(self):
         import torch
@@ -269,15 +271,23 @@ class NPUDriver(DriverBase):
         """
         Set current device as the given device
         """
-        return get_backend_func("set_current_device", device)
+        import torch
+        return torch.npu.set_device(device)
 
     def get_current_stream(self, device: Optional[int] = None) -> int:
         """
         Get stream for current device
         """
-        # According to torch_npu, the content of a torch.npu.Stream is essentilly an rtStream_t
-        # TODO: use CANN API instead of torchnpu
-        return get_backend_func("get_current_stream", device)
+        import torch
+        import torch_npu
+        if device is None:
+            device = torch.npu.current_device()
+        if hasattr(torch_npu._C, "_npu_getCurrentRawStreamNoWait"):
+            from torch_npu._C import _npu_getCurrentRawStreamNoWait
+            return _npu_getCurrentRawStreamNoWait(device)
+        else:
+            from torch_npu._C import _npu_getCurrentRawStream
+            return _npu_getCurrentRawStream(device)
 
     def get_benchmarker(self):
         from triton.testing import do_bench
@@ -587,8 +597,8 @@ def make_launcher(constants, signature, metadata):
     """
     args:
         int gridX, gridY, gridZ;
-        rtStream_t stream;
-        const void *functon;
+        aclrtStream stream;
+        aclrtFuncHandle functon;
         PyObject* packed_metadata, *launch_metadata;
         PyObject* launch_enter_hook, *launch_exit_hook;
         *args_expand
@@ -698,15 +708,21 @@ static void release_npu_tensor_handle(void* handle) {{
     # and the program-id/grid axis it applies to. Each program now covers H tiles
     # along that axis, so the host shrinks the matching grid dim by H here (the
     # equivalent of what bishengir AutoBlockify used to do via hacc.coalesce_factor;
-    # bishengir no longer touches it). The division is unconditional and mirrors the
-    # old integer division -- the kernel rewrite assumes grid[axis] % H == 0.
+    # bishengir no longer touches it). RowCoalescing can request ceil-div because
+    # its generated row mask handles tail rows.
     coalesce_factor = int(getattr(metadata, "coalesce_factor", 1) or 1)
     coalesce_axis = int(getattr(metadata, "coalesce_axis", -1))
+    coalesce_grid_ceil_div = bool(getattr(metadata, "coalesce_grid_ceil_div", False))
     if coalesce_factor > 1 and coalesce_axis in (0, 1, 2):
         _coalesce_grid_var = {0: "gridX", 1: "gridY", 2: "gridZ"}[coalesce_axis]
-        coalesce_grid_div = (f"// coalescing: each program covers {coalesce_factor} tiles along "
-                             f"axis {coalesce_axis}; shrink that grid dim.\n"
-                             f"  {_coalesce_grid_var} = {_coalesce_grid_var} / {coalesce_factor};")
+        _coalesce_grid_expr = (f"({_coalesce_grid_var} + {coalesce_factor} - 1) / {coalesce_factor}"
+                               if coalesce_grid_ceil_div else f"{_coalesce_grid_var} / {coalesce_factor}")
+        coalesce_grid_div = (
+            f"// coalescing: each program covers {coalesce_factor} tiles along "
+            f"axis {coalesce_axis}; shrink that grid dim.\n" +
+            ("" if coalesce_grid_ceil_div else f"  assert({_coalesce_grid_var} % {coalesce_factor} == 0 && "
+             f"\"ChunkCoalescing: grid[{coalesce_axis}] not divisible by coalesce_factor {coalesce_factor}\");\n") +
+            f"  {_coalesce_grid_var} = {_coalesce_grid_expr};")
     else:
         coalesce_grid_div = ""
 
@@ -763,6 +779,8 @@ extern "C" {
   extern int MsprofRegisterCallback(unsigned int moduleId, callback handle);
   static unsigned int __MsprofFlagL0  = 0;
   static unsigned int __MsprofFlagL1  = 0;
+  static const char* kernelName = nullptr ;
+  static std::vector<int> tensorKinds;
 
   int ProfCtrlHandle(unsigned int CtrlType, void* CtrlData, unsigned int DataLen) {
     if ((CtrlData == nullptr) || (DataLen == 0U)) {
@@ -784,7 +802,7 @@ extern "C" {
 """
 
     cpp_msprof_callback = """
-  MsprofRegisterCallback(8, ProfCtrlHandle);      // 8 - CCE defined in msprof headerfile slog.h
+    MsprofRegisterCallback(8, ProfCtrlHandle);      // 8 - CCE defined in msprof headerfile slog.h
 """
 
     cpp_msprof_call_before_launch = """
@@ -900,28 +918,29 @@ extern "C" {
 """
 
     cpp_kernel_launch = f"""
-    ret = rtKernelLaunch(func, blockNum, static_cast<void*>(launch_args.data()), launch_args.size(), NULL, stream);
-"""
-    if compile_on_910_95 and enable_simt:
-        cpp_kernel_launch = f"""
-    rtArgsEx_t argsInfo = {{}};
-    argsInfo.args = static_cast<void*>(launch_args.data());
-    argsInfo.argsSize = launch_args.size();
-    rtTaskCfgInfo_t cfgInfo = {{}};
-    cfgInfo.localMemorySize = {metadata.shared_mem_dynamic_size};
-    ret = rtKernelLaunchWithFlagV2(func, blockNum, &argsInfo, NULL, stream, 0, &cfgInfo);
+    ret = aclrtLaunchKernelWithHostArgs(func, blockNum, stream, nullptr, static_cast<void*>(launch_args.data()), launch_args.size(), nullptr, 0);
 """
     cpp_kernel_launch_local = f"""
-    ret = rtKernelLaunch(func, blockNum, static_cast<void*>(&args), sizeof(args), NULL, stream);
-"""
+        ret = aclrtLaunchKernelWithHostArgs(func, blockNum, stream, nullptr, &args, sizeof(args), nullptr, 0);
+    """
     if compile_on_910_95 and enable_simt:
+        cpp_kernel_args = f"""
+        aclrtLaunchKernelAttr attrInfo = {{}};
+        attrInfo.id = ACL_RT_LAUNCH_KERNEL_ATTR_DYN_UBUF_SIZE;
+        aclrtLaunchKernelAttrValue value = {{}};
+        value.localMemorySize = {metadata.shared_mem_dynamic_size};
+        attrInfo.value = value;
+        aclrtLaunchKernelCfg cfgCfgInfo = {{}};
+        cfgCfgInfo.attrs = &attrInfo;
+        cfgCfgInfo.numAttrs = 1;
+    """
+        cpp_kernel_launch = f"""
+        {cpp_kernel_args}
+        ret = aclrtLaunchKernelWithHostArgs(func, blockNum, stream, &cfgCfgInfo,  static_cast<void*>(launch_args.data()), launch_args.size() , nullptr, 0);
+"""
         cpp_kernel_launch_local = f"""
-    rtArgsEx_t argsInfo = {{}};
-    argsInfo.args = static_cast<void*>(&args);
-    argsInfo.argsSize = sizeof(args);
-    rtTaskCfgInfo_t cfgInfo = {{}};
-    cfgInfo.localMemorySize = {metadata.shared_mem_dynamic_size};
-    ret = rtKernelLaunchWithFlagV2(func, blockNum, &argsInfo, NULL, stream, 0, &cfgInfo);
+        {cpp_kernel_args}
+        ret = aclrtLaunchKernelWithHostArgs(func, blockNum, stream, &cfgCfgInfo,  &args, sizeof(args) , nullptr, 0);
 """
 
     npu_headers = generate_npu_header_src()
@@ -947,9 +966,7 @@ static inline size_t _align_launch_offset(size_t offset, size_t alignment) {{
 }}
 
 extern "C" {{
-void triton_launch_kernel(
-    const char* kernelName, const void* func, rtStream_t stream,
-    int gridX, int gridY, int gridZ,
+void triton_launch_kernel(const char* kernelName, aclrtFuncHandle func, aclrtStream stream, int gridX, int gridY, int gridZ,
     const int64_t* shapes_data, const int* shape_dims, int num_tensors,
     const int* tensor_kinds,
     const void* const* kernel_args, const size_t* arg_sizes, int num_args) {{
@@ -988,8 +1005,7 @@ void triton_launch_kernel(
   // only 1D parallelization is supported for NPU
   // Pointer type becomes flattend 1-D Memref tuple: base_ptr, data_ptr, offset, shape, stride
   // base_ptr offset shape and stride are not used, arbitrarily set for now
-  std::string name = "";
-  name.append(kernelName);
+  static std::string name(kernelName);
   void *workspace_addr_ptr = NULL;
   {coalesce_grid_div}
   uint32_t blockNum4Workspace = gridX * gridY * gridZ;
@@ -1001,7 +1017,7 @@ void triton_launch_kernel(
     {workspace_fail_code}
   }}
   ''' if workspace_size > 0 else ''}
-  {'std::function<rtError_t()> launch_call = [=]() -> rtError_t' if enable_taskqueue else ''} {{
+  {'std::function<aclError()> launch_call = [=]() -> aclError' if enable_taskqueue else ''} {{
     {get_backend_func("pre_launch", False)}
     uint32_t blockNum = gridX * gridY * gridZ;
 
@@ -1018,9 +1034,9 @@ void triton_launch_kernel(
     uint32_t nodeBasicBlockDim = (mixBlockNumRation << 16) + blockNum;
 
     {'cce::internal::DebugTunnelData *DTData = cce::internal::DebugTunnel::Open(blockNum);' if enable_device_print else ''}
-    rtError_t ret = RT_ERROR_NONE;
-    {'void *ffts_addr = NULL; uint32_t ffts_len; ret = rtGetC2cCtrlAddr((uint64_t*)&ffts_addr, &ffts_len);' if target_support_ffts else ''}
-    {'if (ret != RT_ERROR_NONE) return ret;' if (target_support_ffts and enable_taskqueue) else 'if (ret != RT_ERROR_NONE) return;' if (target_support_ffts and (not enable_taskqueue)) else ''}
+    aclError ret = ACL_SUCCESS;
+    {'void *ffts_addr = NULL; uint32_t ffts_len; ret = aclrtGetHardwareSyncAddr(&ffts_addr);' if target_support_ffts else ''}
+    {'if (ret != ACL_SUCCESS) return ret;' if (target_support_ffts and enable_taskqueue) else 'if (ret != ACL_SUCCESS) return;' if (target_support_ffts and (not enable_taskqueue)) else ''}
     // stub argument for workspace
     void *syncBlockLock_ptr = NULL;
     void *syncBlockLock_handle = NULL;
@@ -1033,16 +1049,16 @@ void triton_launch_kernel(
       {alloc_success_code if enable_taskqueue else sync_lock_fail_code}
     }}
     std::vector<int64_t> lockInitData({lock_num}, {lock_init_value});
-    ret = rtMemcpy(
+    ret = aclrtMemcpy(
         syncBlockLock_ptr, syncBlockLockSize,
         reinterpret_cast<void *>(lockInitData.data()), syncBlockLockSize,
-        RT_MEMCPY_HOST_TO_DEVICE
+        ACL_MEMCPY_HOST_TO_DEVICE
     );
-    if (ret != RT_ERROR_NONE) {{
+    if (ret != ACL_SUCCESS) {{
       return {'ret' if enable_taskqueue else ''};
     }}
     ''' if lock_num > 0 else ''}
-    {'if (ret != RT_ERROR_NONE) return ret;' if (workspace_size > 0 and enable_taskqueue) else 'if (ret != RT_ERROR_NONE) return;' if (workspace_size > 0 and not enable_taskqueue) else ''}
+    {'if (ret != ACL_SUCCESS) return ret;' if (workspace_size > 0 and enable_taskqueue) else 'if (ret != ACL_SUCCESS) return;' if (workspace_size > 0 and not enable_taskqueue) else ''}
 
     size_t args_offset = 0;
     auto reserve_slot = [&](size_t size, size_t alignment) -> size_t {{
@@ -1087,21 +1103,20 @@ void triton_launch_kernel(
     {'void *&stream_ref = const_cast<void*&>(stream);' if enable_device_print else ''}
     {'cce::internal::DebugTunnel::Close(DTData, stream_ref);' if enable_device_print else ''}
     {cpp_msprof_call_after_launch}
-    {'return ret;' if enable_taskqueue else 'ret = rtStreamSynchronize(stream);'}
+    {'return ret;' if enable_taskqueue else 'ret = aclrtSynchronizeStream(stream);'}
    }};
    {f'''{get_backend_func("async_launch", "launch_call") if enable_taskqueue else ''}'''}
   return;
 }}
 }} // extern "C"
 
-static void _launch(const char* kernelName, const void* func, rtStream_t stream, int gridX, int gridY, int gridZ, std::vector<std::vector<int64_t>> &tensorShapes, std::vector<int> &tensorKinds{(', ' + arg_decls) if len(arg_decls) > 0 else ''}) {{
+static void _launch(const char* kernelName, aclrtFuncHandle func, aclrtStream stream, int gridX, int gridY, int gridZ, std::vector<std::vector<int64_t>> &tensorShapes, std::vector<int> &tensorKinds{(', ' + arg_decls) if len(arg_decls) > 0 else ''}) {{
   // Keep Python launcher on the stable local packing path.
   if (gridX <=0 || gridY <=0 || gridZ <=0) {{
     printf("WARNING: Skipping launch for kernel '%s' due to empty grid (gridX=%d, gridY=%d, gridZ=%d).\\n", kernelName, gridX, gridY, gridZ);
     return;
   }}
-  std::string name = "";
-  name.append(kernelName);
+  static std::string name(kernelName);
   void *workspace_addr_ptr = NULL;
   {coalesce_grid_div}
   uint32_t blockNum4Workspace = gridX * gridY * gridZ;
@@ -1113,7 +1128,7 @@ static void _launch(const char* kernelName, const void* func, rtStream_t stream,
     {workspace_fail_code}
   }}
   ''' if workspace_size > 0 else ''}
-  {'std::function<rtError_t()> launch_call = [=]() -> rtError_t' if enable_taskqueue else ''} {{
+  {'std::function<aclError()> launch_call = [=]() -> aclError' if enable_taskqueue else ''} {{
     {get_backend_func("pre_launch", False)}
     uint32_t blockNum = gridX * gridY * gridZ;
 
@@ -1129,9 +1144,9 @@ static void _launch(const char* kernelName, const void* func, rtStream_t stream,
     uint32_t nodeBasicBlockDim = (mixBlockNumRation << 16) + blockNum;
 
     {'cce::internal::DebugTunnelData *DTData = cce::internal::DebugTunnel::Open(blockNum);' if enable_device_print else ''}
-    rtError_t ret = RT_ERROR_NONE;
-    {'void *ffts_addr = NULL; uint32_t ffts_len; ret = rtGetC2cCtrlAddr((uint64_t*)&ffts_addr, &ffts_len);' if target_support_ffts else ''}
-    {'if (ret != RT_ERROR_NONE) return ret;' if (target_support_ffts and enable_taskqueue) else 'if (ret != RT_ERROR_NONE) return;' if (target_support_ffts and (not enable_taskqueue)) else ''}
+    aclError ret = ACL_SUCCESS;
+    {'void *ffts_addr = NULL; uint32_t ffts_len; ret = aclrtGetHardwareSyncAddr(&ffts_addr);' if target_support_ffts else ''}
+    {'if (ret != ACL_SUCCESS) return ret;' if (target_support_ffts and enable_taskqueue) else 'if (ret != ACL_SUCCESS) return;' if (target_support_ffts and (not enable_taskqueue)) else ''}
     void *syncBlockLock_ptr = NULL;
     void *syncBlockLock_handle = NULL;
     uint16_t ModuleId = 0;
@@ -1143,16 +1158,16 @@ static void _launch(const char* kernelName, const void* func, rtStream_t stream,
       {alloc_success_code if enable_taskqueue else sync_lock_fail_code}
     }}
     std::vector<int64_t> lockInitData({lock_num}, {lock_init_value});
-    ret = rtMemcpy(
+    ret = aclrtMemcpy(
         syncBlockLock_ptr, syncBlockLockSize,
         reinterpret_cast<void *>(lockInitData.data()), syncBlockLockSize,
-        RT_MEMCPY_HOST_TO_DEVICE
+        ACL_MEMCPY_HOST_TO_DEVICE
     );
-    if (ret != RT_ERROR_NONE) {{
+    if (ret != ACL_SUCCESS) {{
       return {'ret' if enable_taskqueue else ''};
     }}
     ''' if lock_num > 0 else ''}
-    {'if (ret != RT_ERROR_NONE) return ret;' if (workspace_size > 0 and enable_taskqueue) else 'if (ret != RT_ERROR_NONE) return;' if (workspace_size > 0 and not enable_taskqueue) else ''}
+    {'if (ret != ACL_SUCCESS) return ret;' if (workspace_size > 0 and enable_taskqueue) else 'if (ret != ACL_SUCCESS) return;' if (workspace_size > 0 and not enable_taskqueue) else ''}
     struct __attribute__((packed)) {{
       {'void* ffts_addr __attribute__((aligned(8)));' if target_support_ffts else ''}
       {'void* syncBlockLock __attribute__((aligned(8)));' if not metadata.force_simt_only else ''}
@@ -1175,7 +1190,7 @@ static void _launch(const char* kernelName, const void* func, rtStream_t stream,
     {'void *&stream_ref = const_cast<void*&>(stream);' if enable_device_print else ''}
     {'cce::internal::DebugTunnel::Close(DTData, stream_ref);' if enable_device_print else ''}
     {cpp_msprof_call_after_launch}
-    {'return ret;' if enable_taskqueue else 'ret = rtStreamSynchronize(stream);'}
+    {'return ret;' if enable_taskqueue else 'ret = aclrtSynchronizeStream(stream);'}
    }};
    {f'''{get_backend_func("async_launch", "launch_call") if enable_taskqueue else ''}'''}
   return;
@@ -1214,8 +1229,8 @@ static std::vector<int64_t> _get_tensor_shape(PyObject *tensor) {{
 
 static PyObject* launch(PyObject* self, PyObject* args) {{
   int gridX, gridY, gridZ;
-  rtStream_t stream;
-  const void *function;
+  aclrtStream stream;
+  aclrtFuncHandle function;
   PyObject *packedMetadata = NULL;
   PyObject *launch_metadata = NULL;
   PyObject *launch_enter_hook = NULL;
@@ -1252,17 +1267,20 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
 
 
   // get kernel_name
-  PyObject *kernelNameObj = PyDict_GetItemString(packedMetadata, "kernel_name");
-  const char *kernelName = PyUnicode_AsUTF8(kernelNameObj);
+  if (!kernelName) {{
+      PyObject *kernelNameObj = PyDict_GetItemString(packedMetadata, "kernel_name");
+      kernelName = PyUnicode_AsUTF8(kernelNameObj);
+  }}
   // get tensor_kinds
-  std::vector<int> tensorKinds;
-  PyObject *tensorKindList = PyDict_GetItemString(packedMetadata, "tensor_kinds");
-  if (tensorKindList) {{
-    int size = PyObject_Size(tensorKindList);
-    for (int i = 0; i < size; i++) {{
-      PyObject *kind = PySequence_GetItem(tensorKindList, i);
-      tensorKinds.push_back(PyLong_AsLong(kind));
-    }}
+  if( tensorKinds.empty() ) {{
+     PyObject *tensorKindList = PyDict_GetItemString(packedMetadata, "tensor_kinds");
+     if (tensorKindList) {{
+       int size = PyObject_Size(tensorKindList);
+       for (int i = 0; i < size; i++) {{
+         PyObject *kind = PySequence_GetItem(tensorKindList, i);
+         tensorKinds.push_back(PyLong_AsLong(kind));
+       }}
+     }}
   }}
 
 
