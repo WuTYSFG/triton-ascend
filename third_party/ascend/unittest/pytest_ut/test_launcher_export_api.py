@@ -164,8 +164,7 @@ def test_make_launcher_enables_91095_simt_for_sls_mixed_parallel_mode(
 
     # Both the ABI and local generated launch paths use the 910_95 SIMT launch
     # API only when the T2L result advertises SIMT in parallel_mode.
-    assert src.count("rtKernelLaunchWithFlagV2") == 2
-    assert src.count("rtArgsEx_t argsInfo") == 2
+    assert src.count("aclrtLaunchKernelWithHostArgs") == 2
 
 
 @patch.object(driver, "NPUUtils")
