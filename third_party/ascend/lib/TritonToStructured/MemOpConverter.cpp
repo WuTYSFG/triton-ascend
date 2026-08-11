@@ -244,6 +244,15 @@ LogicalResult LoadConverter::matchAndRewrite(triton::LoadOp op,
   auto newMask = tf.createNewMask(oldMask, loc, rewriter);
   auto newOther = tf.createNewOther(oldOther, loc, rewriter);
 
+  // If the pointer has negative stride, mark the original load for
+  // unstructured access to avoid generating memref.reinterpret_cast with
+  // negative strides in TritonToLinalg.
+  if (tf.hasNegativeStride()) {
+    auto markOp = rewriter.create<annotation::MarkOp>(loc, op.getResult());
+    markOp->setAttr("mayDiscretememaccess", rewriter.getUnitAttr());
+    return success();
+  }
+
   if (!tf.ptrState.shouldLinearize) {
     // no need to rewrite
     return failure();
@@ -299,6 +308,15 @@ LogicalResult StoreConverter::matchAndRewrite(triton::StoreOp op,
 
   auto newPtr = tf.createNewPtr(oldPtr, loc, rewriter);
   auto newMask = tf.createNewMask(oldMask, loc, rewriter);
+
+  // If the pointer has negative stride, mark the original store for
+  // unstructured access to avoid generating memref.reinterpret_cast with
+  // negative strides in TritonToLinalg.
+  if (tf.hasNegativeStride()) {
+    auto markOp = rewriter.create<annotation::MarkOp>(loc, op.getValue());
+    markOp->setAttr("mayDiscretememaccess", rewriter.getUnitAttr());
+    return success();
+  }
 
   if (!tf.ptrState.shouldLinearize) {
     // no need to rewrite
@@ -720,6 +738,15 @@ bool MemOpTransformer::applyPermuteOnMask() {
   }
   maskState.stateInfo = newMaskInfo;
   return true;
+}
+
+bool MemOpTransformer::hasNegativeStride() const {
+  for (const auto &info : ptrState.stateInfo) {
+    auto staticStride = getIntAttr(info.stride);
+    if (staticStride && *staticStride < 0)
+      return true;
+  }
+  return false;
 }
 
 hivm::CreateSyncBlockLockOp createSyncBlockLockVar(OpBuilder &builder,

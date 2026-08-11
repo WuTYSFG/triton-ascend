@@ -117,6 +117,8 @@ public:
                        PatternRewriter &rewriter);
 
   bool applyPermuteOnMask();
+
+  bool hasNegativeStride() const;
 };
 
 // Create local lock var
