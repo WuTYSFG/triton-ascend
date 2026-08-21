@@ -106,6 +106,7 @@ def _launch_kernel(A, B, C, Out, BLOCK_M=32, BLOCK_N=32, BLOCK_K=32):
         BLOCK_K=BLOCK_K,
     )
 
+
 def test_workspace():
     M = 256 * 64
     N = 256 * 64
