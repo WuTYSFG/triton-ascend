@@ -25,12 +25,21 @@ import torch
 
 @triton.jit
 def matmul_mul_kernel(
-    A_ptr, B_ptr, C_ptr, Out_ptr,
-    M, N, K,
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
-    stride_om, stride_on,
+    A_ptr,
+    B_ptr,
+    C_ptr,
+    Out_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_om,
+    stride_on,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -46,22 +55,16 @@ def matmul_mul_kernel(
     n_mask = rn[None, :] < N
     full_mask = m_mask & n_mask
 
-    A = tl.load(
-        A_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak,
-        mask=m_mask, other=0.0)
+    A = tl.load(A_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak, mask=m_mask, other=0.0)
 
-    B = tl.load(
-        B_ptr + rk[:, None] * stride_bk + rn[None, :] * stride_bn,
-        mask=n_mask, other=0.0)
+    B = tl.load(B_ptr + rk[:, None] * stride_bk + rn[None, :] * stride_bn, mask=n_mask, other=0.0)
 
-    C = tl.load(
-        C_ptr + rm[:, None] * stride_cm + rn[None, :] * stride_cn,
-        mask=full_mask, other=0.0)
+    C = tl.load(C_ptr + rm[:, None] * stride_cm + rn[None, :] * stride_cn, mask=full_mask, other=0.0)
+
     AB = tl.dot(A, B)
     Out = AB * C
-    tl.store(
-        Out_ptr + rm[:, None] * stride_om + rn[None, :] * stride_on,
-        Out, mask=full_mask)
+
+    tl.store(Out_ptr + rm[:, None] * stride_om + rn[None, :] * stride_on, Out, mask=full_mask)
 
 
 def _make_inputs(M: int, N: int, K: int, dtype=torch.float16, device="cpu"):
@@ -83,18 +86,29 @@ def _launch_kernel(A, B, C, Out, BLOCK_M=32, BLOCK_N=32, BLOCK_K=32):
     _, N = B.shape
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     matmul_mul_kernel[grid](
-        A, B, C, Out,
-        M, N, K,
-        A.stride(0), A.stride(1),
-        B.stride(0), B.stride(1),
-        C.stride(0), C.stride(1),
-        Out.stride(0), Out.stride(1),
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        A,
+        B,
+        C,
+        Out,
+        M,
+        N,
+        K,
+        A.stride(0),
+        A.stride(1),
+        B.stride(0),
+        B.stride(1),
+        C.stride(0),
+        C.stride(1),
+        Out.stride(0),
+        Out.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
     )
 
 def test_workspace():
-    M = 256*64
-    N = 256*64
+    M = 256 * 64
+    N = 256 * 64
     K = 32
 
     A, B, C, Out = _make_inputs(M, N, K, device="npu")
