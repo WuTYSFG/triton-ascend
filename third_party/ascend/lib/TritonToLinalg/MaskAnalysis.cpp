@@ -429,8 +429,10 @@ LogicalResult MaskState::parseSel(arith::SelectOp selOp, const Location &loc,
     return failure();
   }
 
-  auto trueScalar = dyn_cast<IntegerAttr>(trueState.scalar.get<Attribute>());
-  auto falseScalar = dyn_cast<IntegerAttr>(falseState.scalar.get<Attribute>());
+  auto trueScalar =
+      dyn_cast_if_present<IntegerAttr>(dyn_cast<Attribute>(trueState.scalar));
+  auto falseScalar =
+      dyn_cast_if_present<IntegerAttr>(dyn_cast<Attribute>(falseState.scalar));
 
   if (trueScalar && falseScalar) {
     if(trueScalar.getInt() == 1 && falseScalar.getInt() == 0) {

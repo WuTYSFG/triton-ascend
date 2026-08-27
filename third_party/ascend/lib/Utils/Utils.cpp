@@ -95,7 +95,7 @@ std::optional<int64_t> getLastStrideOfReinterpretCastOp(memref::ReinterpretCastO
 
   OpFoldResult lastStride = mixedStrides.back();
 
-  if (op.getStaticStrides().back() > 0) {
+  if (op.getStaticStrides().back() != ShapedType::kDynamic) {
     return op.getStaticStrides().back();
   } else if (isa<BlockArgument>(op.getStrides().back()) ) {
     auto u = op.getStrides().back();
