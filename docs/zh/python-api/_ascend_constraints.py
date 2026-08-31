@@ -1017,16 +1017,6 @@ CONSTRAINTS = {
         "example":
         "triton.language.extra.cann.extension.sub_vec_id",
     },
-    "triton.language.extra.cann.extension.subview": {
-        "constraints": [
-            "Offsets, sizes, and strides must be non-negative.",
-            "Each dimension size cannot exceed the original buffer's corresponding dimension.",
-            "All stride elements must be 1.",
-            "Offset must be 32-byte aligned.",
-        ],
-        "example":
-        "triton.language.extra.cann.extension.subview",
-    },
     "triton.language.extra.cann.extension.sync_block_all": {
         "constraints": [
             "mode: must be one of 'all_cube', 'all_vector', 'all', 'all_sub_vector'.",
