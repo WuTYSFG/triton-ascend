@@ -60,8 +60,7 @@ CONSTRAINTS = {
         "constraints": [
             "Same type support constraints as alloc.",
         ],
-        "dtype_support":
-        """
+        "dtype_support": """
             +--------------+-------+------+--------+-------+--------+-------+--------+-------+------+------+------+------+------------+-------------+------+
             | 平台         | uint8 | int8 | uint16 | int16 | uint32 | int32 | uint64 | int64 | fp16 | fp32 | fp64 | bf16 | fp8e(e4m3) | fp8e5(e5m2) | bool |
             +==============+=======+======+========+=======+========+=======+========+=======+======+======+======+======+============+=============+======+
@@ -97,8 +96,7 @@ CONSTRAINTS = {
     },
     "triton.extension.buffer.language.address_space": {
         "constraints": [],
-        "example":
-        "triton.extension.buffer.language.address_space",
+        "example": "triton.extension.buffer.language.address_space",
     },
     "triton.extension.buffer.language.buffer_type": {
         "replace_docstring": [
@@ -117,8 +115,7 @@ CONSTRAINTS = {
     },
     "triton.extension.buffer.language.buffer": {
         "constraints": [],
-        "example":
-        "triton.extension.buffer.language.buffer",
+        "example": "triton.extension.buffer.language.buffer",
     },
     "triton.language.permute": {
         "constraints": [],
