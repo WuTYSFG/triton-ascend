@@ -25,6 +25,7 @@ import triton
 import triton.language as tl
 import torch
 
+
 @triton.jit
 def gather_2d_simd(src_ptr, idx_ptr, out_ptr, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, XBLOCK: tl.constexpr,
                    XBLOCK_SUB: tl.constexpr):
