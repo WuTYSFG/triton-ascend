@@ -24,7 +24,8 @@ CONSTRAINTS = {
             "Shape: Each element must be a positive integer.",
             "Address space: must fit within the specified address space size limits.",
         ],
-        "dtype_support": """
+        "dtype_support":
+        """
             +--------------+-------+------+--------+-------+--------+-------+--------+-------+------+------+------+------+------------+-------------+------+
             | 平台         | uint8 | int8 | uint16 | int16 | uint32 | int32 | uint64 | int64 | fp16 | fp32 | fp64 | bf16 | fp8e(e4m3) | fp8e5(e5m2) | bool |
             +==============+=======+======+========+=======+========+=======+========+=======+======+======+======+======+============+=============+======+
@@ -42,7 +43,8 @@ CONSTRAINTS = {
             "When using bind_buffer, tensor and bind_buffer must have identical shapes and element types.",
             "A tensor cannot be bound to multiple buffers.",
         ],
-        "dtype_support": """
+        "dtype_support":
+        """
             +--------------+-------+------+--------+-------+--------+-------+--------+-------+------+------+------+------+------------+-------------+------+
             | 平台         | uint8 | int8 | uint16 | int16 | uint32 | int32 | uint64 | int64 | fp16 | fp32 | fp64 | bf16 | fp8e(e4m3) | fp8e5(e5m2) | bool |
             +==============+=======+======+========+=======+========+=======+========+=======+======+======+======+======+============+=============+======+
@@ -58,7 +60,8 @@ CONSTRAINTS = {
         "constraints": [
             "Same type support constraints as alloc.",
         ],
-        "dtype_support": """
+        "dtype_support":
+        """
             +--------------+-------+------+--------+-------+--------+-------+--------+-------+------+------+------+------+------------+-------------+------+
             | 平台         | uint8 | int8 | uint16 | int16 | uint32 | int32 | uint64 | int64 | fp16 | fp32 | fp64 | bf16 | fp8e(e4m3) | fp8e5(e5m2) | bool |
             +==============+=======+======+========+=======+========+=======+========+=======+======+======+======+======+============+=============+======+
@@ -79,7 +82,8 @@ CONSTRAINTS = {
             "Offset must be 32-byte aligned.",
             "In the subview, the offset of the first element of the second row along the last dimension must be 32-byte aligned.",
         ],
-        "dtype_support": """
+        "dtype_support":
+        """
             +--------------+-------+------+--------+-------+--------+-------+--------+-------+------+------+------+------+------------+-------------+------+
             | 平台         | uint8 | int8 | uint16 | int16 | uint32 | int32 | uint64 | int64 | fp16 | fp32 | fp64 | bf16 | fp8e(e4m3) | fp8e5(e5m2) | bool |
             +==============+=======+======+========+=======+========+=======+========+=======+======+======+======+======+============+=============+======+
@@ -88,11 +92,13 @@ CONSTRAINTS = {
             | Ascend 950   |   √   |  √   |   ×    |   √   |   ×    |   √   |   √    |   √   |  ×   |  √   |  ×   |  √   |     ×      |      ×      |  √   |
             +--------------+-------+------+--------+-------+--------+-------+--------+-------+------+------+------+------+------------+-------------+------+
             """,
-        "example": "triton.extension.buffer.language.subview",
+        "example":
+        "triton.extension.buffer.language.subview",
     },
     "triton.extension.buffer.language.address_space": {
         "constraints": [],
-        "example": "triton.extension.buffer.language.address_space",
+        "example":
+        "triton.extension.buffer.language.address_space",
     },
     "triton.extension.buffer.language.buffer_type": {
         "replace_docstring": [
@@ -111,7 +117,8 @@ CONSTRAINTS = {
     },
     "triton.extension.buffer.language.buffer": {
         "constraints": [],
-        "example": "triton.extension.buffer.language.buffer",
+        "example":
+        "triton.extension.buffer.language.buffer",
     },
     "triton.language.permute": {
         "constraints": [],
