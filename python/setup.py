@@ -8,6 +8,7 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
+import time
 import zipfile
 import urllib.request
 import json
@@ -629,13 +630,35 @@ def add_git_safe_dir(path: str):
         ], cwd=Path(triton_dir))
 
 
+def _git_check_call_with_retry(cmd, cwd=None, retries=3, interval=5):
+    """Run a git network command (clone/fetch) with retries.
+
+    Network operations against the remote may fail intermittently; retry up to
+    ``retries`` times, waiting ``interval`` seconds between attempts.
+    """
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            subprocess.check_call(cmd, cwd=cwd)
+            return
+        except subprocess.CalledProcessError as e:
+            last_error = e
+            if attempt < retries:
+                print(f"Command '{' '.join(cmd)}' failed (attempt {attempt}/{retries}), "
+                      f"retrying in {interval}s...")
+                time.sleep(interval)
+            else:
+                print(f"Command '{' '.join(cmd)}' failed after {retries} attempts.")
+    raise last_error
+
+
 def ensure_distributed_submodule():
     if not check_env_flag("TRITON_BUILD_TD", "OFF"):
         return
     distributed_dir = Path(triton_dir) / "third_party" / "ascend" / "Triton-distributed-ascend"
     commit_id = "79d30caff7b66aa27092956a08deea3e5ec53a41"
     if not distributed_dir.is_dir():
-        subprocess.check_call([
+        _git_check_call_with_retry([
             "git",
             "clone",
             "https://gitcode.com/Ascend/Triton-distributed-ascend.git",
@@ -644,6 +667,11 @@ def ensure_distributed_submodule():
         ], cwd=Path(triton_dir) / "third_party" / "ascend")
     if is_git_repo():
         add_git_safe_dir(str(distributed_dir))
+        _git_check_call_with_retry([
+            "git",
+            "fetch",
+            "origin",
+        ], cwd=distributed_dir)
         subprocess.check_call([
             "git",
             "checkout",
