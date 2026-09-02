@@ -77,9 +77,15 @@ private:
   int transferIndex = 0;
   int markAllocIndex = 0;
 
+  llvm::DenseMap<int, llvm::SmallVector<LoopLikeOpInterface>> loopInclusions;
+  llvm::DenseSet<int> singleLoopSet;
+
   llvm::DenseMap<mlir::Value, mlir::Value> vecValueMapping;
   llvm::DenseMap<mlir::Value, mlir::Value> cubeValueMapping;
   SSBufferManager ssbufferManager;
+
+  void analyzeLoopInclusion();
+  void moveStartEndSync(mlir::OpBuilder &builder);
 
   mlir::LogicalResult processDependencies(FlagIdManager &flagManager, FlagIdReuseManager &flagIdReuseManager);
   mlir::LogicalResult handleVectorToCube(mlir::OpBuilder &builder,
