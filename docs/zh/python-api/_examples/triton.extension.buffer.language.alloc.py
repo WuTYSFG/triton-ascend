@@ -1,14 +1,48 @@
+import torch
+import torch_npu
 import triton
 import triton.language as tl
 import triton.extension.buffer.language as bl
 import triton.language.extra.cann.extension as al
+import pytest
 
 
 @triton.jit
-def allocate_local_buffer(XBLOCK: tl.constexpr):
-    bl.alloc(tl.float32, [XBLOCK])
-    bl.alloc(tl.float32, [XBLOCK, XBLOCK], al.ascend_address_space.UB)
-    bl.alloc(tl.float32, [XBLOCK, XBLOCK], al.ascend_address_space.L1)
-    bl.alloc(tl.float32, [XBLOCK, XBLOCK], al.ascend_address_space.L0A)
-    bl.alloc(tl.float32, [XBLOCK, XBLOCK], al.ascend_address_space.L0B)
-    bl.alloc(tl.float32, [XBLOCK, XBLOCK], al.ascend_address_space.L0C)
+def copy_kernel_func(
+        A_ptr,
+        B_ptr,
+        Out_ptr,
+        L: tl.constexpr = None, M: tl.constexpr = None
+):
+    lblk_idx = tl.arange(0, L)
+    mblk_idx = tl.arange(0, M)
+    idx = lblk_idx[:, None] * M + mblk_idx[None, :]
+
+    a_val = tl.load(A_ptr + idx)
+    b_val = tl.load(B_ptr + idx)
+
+    A_ub = bl.alloc(tl.float32, [L, M], al.ascend_address_space.UB)
+
+    add = tl.add(a_val, b_val)
+    add_ub = bl.to_buffer(add, al.ascend_address_space.UB)
+
+    al.copy(add_ub, A_ub)
+    A_ub_tensor = A_ub.to_tensor()
+    tl.store(Out_ptr + idx, A_ub_tensor)
+
+
+testlist = [
+    # 2D
+    (64, 64),
+]
+
+@pytest.mark.parametrize('shape', testlist)
+def test_copy(shape):
+
+    A = torch.rand(size=shape, dtype=torch.float32).npu()
+    B = torch.rand(size=shape, dtype=torch.float32).npu()
+    triton_out_ub = torch.zeros(shape, dtype=torch.float32).npu()
+    torch_out_ub = A + B
+
+    copy_kernel_func[(1,)](A, B, triton_out_ub, *shape)
+    torch.testing.assert_close(triton_out_ub, torch_out_ub, atol=1e-5, rtol=1e-5)
