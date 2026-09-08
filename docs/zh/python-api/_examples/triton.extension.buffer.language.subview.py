@@ -38,7 +38,7 @@ def test_subview(
 ):
     input_tensor = torch.rand(size=src_shape, dtype=torch.float32).npu()
     output_tensor = torch.zeros(sizes, dtype=torch.float32).npu()
-    grid = (1,)
+    grid = (1, )
     test_subview_kernel_2d[grid](input_tensor, output_tensor, shape_0=src_shape[0], shape_1=src_shape[1],
                                  offsets=tuple(offsets), sizes_0=sizes[0], sizes_1=sizes[1], strides=tuple(strides),
                                  enable_auto_bind_sub_block=False)

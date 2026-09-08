@@ -38,5 +38,5 @@ def test_add(shape):
     triton_out_ub = torch.zeros(shape, dtype=torch.float32).npu()
     torch_out_ub = A + B
 
-    add_kernel_func[(1,)](A, B, triton_out_ub, *shape)
+    add_kernel_func[(1, )](A, B, triton_out_ub, *shape)
     torch.testing.assert_close(triton_out_ub, torch_out_ub, atol=1e-5, rtol=1e-5)
