@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 import triton.extension.buffer.language as bl
 import triton.language.extra.cann.extension as al
+from triton.backends.ascend.utils import is_compile_on_910_95
 import pytest
 
 
@@ -28,8 +29,7 @@ testlist = [
     # 2D
     (64, 64),
 ]
-
-
+@pytest.mark.skipif(not is_compile_on_910_95(), reason="It's only support require Ascend 950 temporarily")
 @pytest.mark.parametrize('shape', testlist)
 def test_add(shape):
 
