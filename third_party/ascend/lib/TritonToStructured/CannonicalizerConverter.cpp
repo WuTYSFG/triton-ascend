@@ -305,13 +305,11 @@ LoadBroadcastConverter::matchAndRewrite(triton::LoadOp loadOp,
   auto cache = loadOp.getCache();
   auto evict = loadOp.getEvict();
   auto isVolatile = loadOp.getIsVolatile();
-  auto resultType =
-      dyn_cast<RankedTensorType>(loadOp.getResult().getType());
+  auto resultType = dyn_cast<RankedTensorType>(loadOp.getResult().getType());
   if (!resultType)
     return failure();
 
-  bool shapesMatch =
-      !mask || (ptrSrcType.getShape() == maskSrcType.getShape());
+  bool shapesMatch = !mask || (ptrSrcType.getShape() == maskSrcType.getShape());
 
   // no mask, or ptr/mask src shapes match
   if (shapesMatch) {
@@ -329,13 +327,12 @@ LoadBroadcastConverter::matchAndRewrite(triton::LoadOp loadOp,
       auto elemType = denseOther.getType().getElementType();
       if (!elemType)
         return failure();
-      auto smallType =
-          RankedTensorType::get(ptrSrcType.getShape(), elemType);
+      auto smallType = RankedTensorType::get(ptrSrcType.getShape(), elemType);
 
       DenseElementsAttr newDense;
       if (denseOther.isSplat()) {
-        newDense = DenseElementsAttr::get(smallType,
-                                          denseOther.getSplatValue<Attribute>());
+        newDense = DenseElementsAttr::get(
+            smallType, denseOther.getSplatValue<Attribute>());
       } else {
         return failure();
       }
@@ -368,7 +365,6 @@ LoadBroadcastConverter::matchAndRewrite(triton::LoadOp loadOp,
   return success();
 }
 
-
 // Move store before broadcast when possible:
 // If store.ptr is defined by a triton::BroadcastOp, the broadcast axes refer
 // to the same memory locations (every pointer along a broadcast axis points
@@ -384,7 +380,7 @@ LoadBroadcastConverter::matchAndRewrite(triton::LoadOp loadOp,
 //   tt.store %ptr_src, %val_small, %mask_small?
 LogicalResult
 StoreBroadcastConverter::matchAndRewrite(triton::StoreOp storeOp,
-                                        PatternRewriter &rewriter) const {
+                                         PatternRewriter &rewriter) const {
   // Match when ptr is defined by BroadcastOp
   Value ptr = storeOp.getPtr();
   auto ptrBroadcast = ptr.getDefiningOp<triton::BroadcastOp>();
@@ -422,8 +418,8 @@ StoreBroadcastConverter::matchAndRewrite(triton::StoreOp storeOp,
   Value newValue = storeOp.getValue();
   if (auto valueType = dyn_cast<RankedTensorType>(newValue.getType())) {
     if (valueType.getShape() == resultShape) {
-      newValue = rewriter.create<tensor::ExtractSliceOp>(
-          loc, newValue, offsets, sizes, strides);
+      newValue = rewriter.create<tensor::ExtractSliceOp>(loc, newValue, offsets,
+                                                         sizes, strides);
     } else if (valueType.getShape() != srcShape) {
       return failure();
     }
@@ -444,11 +440,10 @@ StoreBroadcastConverter::matchAndRewrite(triton::StoreOp storeOp,
         if (maskSrcType && maskSrcType.getShape() == srcShape)
           maskSrc = maskBroadcast.getSrc();
       }
-      newMask = maskSrc
-                    ? maskSrc
-                    : static_cast<Value>(
-                          rewriter.create<tensor::ExtractSliceOp>(
-                              loc, mask, offsets, sizes, strides));
+      newMask =
+          maskSrc ? maskSrc
+                  : static_cast<Value>(rewriter.create<tensor::ExtractSliceOp>(
+                        loc, mask, offsets, sizes, strides));
     } else if (maskType.getShape() != srcShape) {
       return failure();
     } else {

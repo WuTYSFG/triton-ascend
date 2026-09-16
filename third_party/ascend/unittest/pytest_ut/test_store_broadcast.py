@@ -36,14 +36,14 @@ def kernel_store_diff_axis_broadcast(
     XBLOCK: tl.constexpr,
     YBLOCK: tl.constexpr,
 ):
-    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)   # [XBLOCK]
-    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)   # [YBLOCK]
+    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)  # [XBLOCK]
+    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)  # [YBLOCK]
 
-    val = tl.load(X_ptr + offsety[None, :])          # [1, YBLOCK]
-    val = tl.broadcast_to(val, (XBLOCK, YBLOCK))     # [XBLOCK, YBLOCK]
+    val = tl.load(X_ptr + offsety[None, :])  # [1, YBLOCK]
+    val = tl.broadcast_to(val, (XBLOCK, YBLOCK))  # [XBLOCK, YBLOCK]
 
-    ptr = Out_ptr + offsety[None, :]                    # [1, YBLOCK]
-    ptr = tl.broadcast_to(ptr, (XBLOCK, YBLOCK))        # [XBLOCK, YBLOCK]
+    ptr = Out_ptr + offsety[None, :]  # [1, YBLOCK]
+    ptr = tl.broadcast_to(ptr, (XBLOCK, YBLOCK))  # [XBLOCK, YBLOCK]
     mask = (offsetx < M)[:, None]
 
     tl.store(ptr, val, mask)
@@ -63,7 +63,7 @@ def torch_store_diff_axis_broadcast(X, M, XBLOCK, YBLOCK):
 ])
 def test_store_diff_axis_broadcast(param_list):
     dtype, M, XBLOCK, YBLOCK = param_list
-    x = test_common.generate_tensor((YBLOCK,), dtype).npu()
+    x = test_common.generate_tensor((YBLOCK, ), dtype).npu()
     out = torch.zeros((XBLOCK, YBLOCK), dtype=eval('torch.' + dtype)).npu()
     ref = torch_store_diff_axis_broadcast(x.cpu(), M, XBLOCK, YBLOCK)
 
@@ -80,14 +80,14 @@ def kernel_store_same_axis_broadcast(
     XBLOCK: tl.constexpr,
     YBLOCK: tl.constexpr,
 ):
-    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)   # [XBLOCK]
-    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)   # [YBLOCK]
+    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)  # [XBLOCK]
+    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)  # [YBLOCK]
 
-    val = tl.load(X_ptr + offsety[None, :])          # [1, YBLOCK]
-    val = tl.broadcast_to(val, (XBLOCK, YBLOCK))     # [XBLOCK, YBLOCK]
+    val = tl.load(X_ptr + offsety[None, :])  # [1, YBLOCK]
+    val = tl.broadcast_to(val, (XBLOCK, YBLOCK))  # [XBLOCK, YBLOCK]
 
-    ptr = Out_ptr + offsety[None, :]                    # [1, YBLOCK]
-    ptr = tl.broadcast_to(ptr, (XBLOCK, YBLOCK))        # [XBLOCK, YBLOCK]
+    ptr = Out_ptr + offsety[None, :]  # [1, YBLOCK]
+    ptr = tl.broadcast_to(ptr, (XBLOCK, YBLOCK))  # [XBLOCK, YBLOCK]
     mask = (offsety < YM)[None, :]
 
     tl.store(ptr, val, mask)
@@ -105,7 +105,7 @@ def torch_store_same_axis_broadcast(X, YM, XBLOCK, YBLOCK):
 ])
 def test_store_same_axis_broadcast(param_list):
     dtype, YM, XBLOCK, YBLOCK = param_list
-    x = test_common.generate_tensor((YBLOCK,), dtype).npu()
+    x = test_common.generate_tensor((YBLOCK, ), dtype).npu()
     out = torch.zeros((XBLOCK, YBLOCK), dtype=eval('torch.' + dtype)).npu()
     ref = torch_store_same_axis_broadcast(x.cpu(), YM, XBLOCK, YBLOCK)
 
@@ -121,14 +121,14 @@ def kernel_store_no_mask_broadcast(
     XBLOCK: tl.constexpr,
     YBLOCK: tl.constexpr,
 ):
-    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)   # [XBLOCK]
-    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)   # [YBLOCK]
+    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)  # [XBLOCK]
+    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)  # [YBLOCK]
 
-    val = tl.load(X_ptr + offsety[None, :])          # [1, YBLOCK]
-    val = tl.broadcast_to(val, (XBLOCK, YBLOCK))     # [XBLOCK, YBLOCK]
+    val = tl.load(X_ptr + offsety[None, :])  # [1, YBLOCK]
+    val = tl.broadcast_to(val, (XBLOCK, YBLOCK))  # [XBLOCK, YBLOCK]
 
-    ptr = Out_ptr + offsety[None, :]                    # [1, YBLOCK]
-    ptr = tl.broadcast_to(ptr, (XBLOCK, YBLOCK))        # [XBLOCK, YBLOCK]
+    ptr = Out_ptr + offsety[None, :]  # [1, YBLOCK]
+    ptr = tl.broadcast_to(ptr, (XBLOCK, YBLOCK))  # [XBLOCK, YBLOCK]
 
     tl.store(ptr, val)
 
@@ -145,7 +145,7 @@ def torch_store_no_mask_broadcast(X, XBLOCK, YBLOCK):
 ])
 def test_store_no_mask_broadcast(param_list):
     dtype, XBLOCK, YBLOCK = param_list
-    x = test_common.generate_tensor((YBLOCK,), dtype).npu()
+    x = test_common.generate_tensor((YBLOCK, ), dtype).npu()
     out = torch.zeros((XBLOCK, YBLOCK), dtype=eval('torch.' + dtype)).npu()
     ref = torch_store_no_mask_broadcast(x.cpu(), XBLOCK, YBLOCK)
 

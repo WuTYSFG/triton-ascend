@@ -36,8 +36,8 @@ def kernel_load_diff_axis_broadcast(
     XBLOCK: tl.constexpr,
     YBLOCK: tl.constexpr,
 ):
-    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)   # [XBLOCK]
-    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)   # [YBLOCK]
+    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)  # [XBLOCK]
+    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)  # [YBLOCK]
 
     ptr = X_ptr + offsety[None, :]
     mask = (offsetx < M)[:, None]
@@ -78,8 +78,8 @@ def kernel_load_diff_axis_broadcast_no_other(
     XBLOCK: tl.constexpr,
     YBLOCK: tl.constexpr,
 ):
-    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)   # [XBLOCK]
-    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)   # [YBLOCK]
+    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)  # [XBLOCK]
+    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)  # [YBLOCK]
 
     ptr = X_ptr + offsety[None, :]
     mask = (offsetx < M)[:, None]
@@ -112,8 +112,8 @@ def kernel_load_same_axis_broadcast(
     XBLOCK: tl.constexpr,
     YBLOCK: tl.constexpr,
 ):
-    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)   # [XBLOCK]
-    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)   # [YBLOCK]
+    offsetx = tl.program_id(0) * XBLOCK + tl.arange(0, XBLOCK)  # [XBLOCK]
+    offsety = tl.program_id(1) * YBLOCK + tl.arange(0, YBLOCK)  # [YBLOCK]
 
     ptr = X_ptr + offsety[None, :]
     mask = (offsety < YM)[None, :]
