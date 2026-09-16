@@ -368,6 +368,105 @@ LoadBroadcastConverter::matchAndRewrite(triton::LoadOp loadOp,
   return success();
 }
 
+
+// Move store before broadcast when possible:
+// If store.ptr is defined by a triton::BroadcastOp, the broadcast axes refer
+// to the same memory locations (every pointer along a broadcast axis points
+// to the same address), so storing once at the first index of each broadcast
+// axis is sufficient. Rewrite
+//   %ptr   = tt.broadcast %ptr_src            // e.g. [32,1] -> [32,32]
+//   %mask  = tt.broadcast %mask_src?          // optional, same expansion
+//   tt.store %ptr, %val, %mask?
+// with
+//   %val_small  = tensor.extract_slice %val[..0..]  // first index per
+//                                                    // broadcast axis
+//   %mask_small = %mask_src | tensor.extract_slice %mask
+//   tt.store %ptr_src, %val_small, %mask_small?
+LogicalResult
+StoreBroadcastConverter::matchAndRewrite(triton::StoreOp storeOp,
+                                        PatternRewriter &rewriter) const {
+  // Match when ptr is defined by BroadcastOp
+  Value ptr = storeOp.getPtr();
+  auto ptrBroadcast = ptr.getDefiningOp<triton::BroadcastOp>();
+  if (!ptrBroadcast)
+    return failure();
+
+  auto ptrSrcType = dyn_cast<RankedTensorType>(ptrBroadcast.getSrc().getType());
+  auto resultType = dyn_cast<RankedTensorType>(ptr.getType());
+  if (!ptrSrcType || !resultType)
+    return failure();
+
+  // Find the axes expanded by broadcast (src size 1 -> full size)
+  auto srcShape = ptrSrcType.getShape();
+  auto resultShape = resultType.getShape();
+  SmallVector<int64_t> broadcastAxes;
+  for (size_t i = 0; i < srcShape.size(); ++i) {
+    if (srcShape[i] == 1 && resultShape[i] != 1)
+      broadcastAxes.push_back(i);
+  }
+  if (broadcastAxes.empty())
+    return failure();
+
+  Location loc = storeOp.getLoc();
+  SmallVector<int64_t> offsets(resultShape.size(), 0);
+  SmallVector<int64_t> strides(resultShape.size(), 1);
+  SmallVector<int64_t> sizes = llvm::to_vector(resultShape);
+  for (auto axis : broadcastAxes)
+    sizes[axis] = 1;
+
+  // Slice value along the broadcast axes (first index) if it has the full
+  // broadcast shape; otherwise it must already match the small ptr shape.
+  Value newValue = storeOp.getValue();
+  if (auto valueType = dyn_cast<RankedTensorType>(newValue.getType())) {
+    if (valueType.getShape() == resultShape) {
+      newValue = rewriter.create<tensor::ExtractSliceOp>(
+          loc, newValue, offsets, sizes, strides);
+    } else if (valueType.getShape() != srcShape) {
+      return failure();
+    }
+  }
+
+  // Slice mask the same way; reuse mask's broadcast source when its shape
+  // matches the small ptr shape, avoiding a redundant extract_slice.
+  Value newMask;
+  if (Value mask = storeOp.getMask()) {
+    auto maskType = dyn_cast<RankedTensorType>(mask.getType());
+    if (!maskType)
+      return failure();
+    if (maskType.getShape() == resultShape) {
+      Value maskSrc = nullptr;
+      if (auto maskBroadcast = mask.getDefiningOp<triton::BroadcastOp>()) {
+        auto maskSrcType =
+            dyn_cast<RankedTensorType>(maskBroadcast.getSrc().getType());
+        if (maskSrcType && maskSrcType.getShape() == srcShape)
+          maskSrc = maskBroadcast.getSrc();
+      }
+      newMask = maskSrc
+                    ? maskSrc
+                    : static_cast<Value>(
+                          rewriter.create<tensor::ExtractSliceOp>(
+                              loc, mask, offsets, sizes, strides));
+    } else if (maskType.getShape() != srcShape) {
+      return failure();
+    } else {
+      newMask = mask;
+    }
+  }
+
+  // Store the reduced slice; broadcast dims all alias the same address.
+  if (newMask) {
+    rewriter.create<triton::StoreOp>(loc, ptrBroadcast.getSrc(), newValue,
+                                     newMask, storeOp.getBoundaryCheck(),
+                                     storeOp.getCache(), storeOp.getEvict());
+  } else {
+    rewriter.create<triton::StoreOp>(loc, ptrBroadcast.getSrc(), newValue,
+                                     storeOp.getBoundaryCheck(),
+                                     storeOp.getCache(), storeOp.getEvict());
+  }
+  rewriter.eraseOp(storeOp);
+  return success();
+}
+
 LogicalResult ZeroStrideMakeTensorPtrConverter::matchAndRewrite(
     triton::MakeTensorPtrOp op, PatternRewriter &rewriter) const {
   // Only rewrite when every stride is statically 0; any non-zero stride
