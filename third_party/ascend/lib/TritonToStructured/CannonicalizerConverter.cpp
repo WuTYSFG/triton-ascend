@@ -408,11 +408,14 @@ StoreBroadcastConverter::matchAndRewrite(triton::StoreOp storeOp,
     return failure();
 
   Location loc = storeOp.getLoc();
-  SmallVector<int64_t> offsets(resultShape.size(), 0);
-  SmallVector<int64_t> strides(resultShape.size(), 1);
-  SmallVector<int64_t> sizes = llvm::to_vector(resultShape);
+  SmallVector<OpFoldResult> offsets, sizes, strides;
+  for (size_t i = 0; i < resultShape.size(); ++i) {
+    offsets.push_back(rewriter.getIndexAttr(0));
+    strides.push_back(rewriter.getIndexAttr(1));
+    sizes.push_back(rewriter.getIndexAttr(resultShape[i]));
+  }
   for (auto axis : broadcastAxes)
-    sizes[axis] = 1;
+    sizes[axis] = rewriter.getIndexAttr(1);
 
   // Slice value along the broadcast axes (first index) if it has the full
   // broadcast shape; otherwise it must already match the small ptr shape.
