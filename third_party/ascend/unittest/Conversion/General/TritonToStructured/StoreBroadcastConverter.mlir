@@ -96,4 +96,3 @@ module {
 
 // CHECK-LABEL: func.func @zero_stride_store_broadcast
 // CHECK: bufferization.materialize_in_destination %{{.*}} in writable %{{.*}} : (tensor<1x64xf32>, memref<1x64xf32, strided<[64, 1]>>) -> ()
-
