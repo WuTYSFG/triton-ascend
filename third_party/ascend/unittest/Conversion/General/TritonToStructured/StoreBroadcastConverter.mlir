@@ -36,7 +36,7 @@ module {
     tt.return
   }
 }
-// CHECK-LABEL: func.func @kernel_store_same_axis_broadcast    
+// CHECK-LABEL: func.func @kernel_store_same_axis_broadcast
 // CHECK:      %[[VAL1:.*]] = tensor.extract_slice %{{.*}}[0, 0] [1, %{{.*}}] [1, 1] : tensor<1x64xf32> to tensor<1x?xf32>
 // CHECK:      %[[VAL2:.*]]= memref.subview %{{.*}}[0, 0] [1, %{{.*}}] [1, 1] : memref<1x64xf32, strided<[64, 1], offset: ?>> to memref<1x?xf32, strided<[64, 1], offset: ?>>
 // CHECK:      bufferization.materialize_in_destination %[[VAL1]] in writable %[[VAL2]]: (tensor<1x?xf32>, memref<1x?xf32, strided<[64, 1], offset: ?>>) -> ()
