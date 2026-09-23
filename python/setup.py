@@ -656,7 +656,7 @@ def ensure_distributed_submodule():
     if not check_env_flag("TRITON_BUILD_TD", "OFF"):
         return
     distributed_dir = Path(triton_dir) / "third_party" / "ascend" / "Triton-distributed-ascend"
-    commit_id = "12040c613d2c9d0ebdfe620dfc46142ebedcde41"
+    commit_id = "8d13d560d172eecf4020113a98f606fe66c037c5"
     if not distributed_dir.is_dir():
         _git_check_call_with_retry([
             "git",
