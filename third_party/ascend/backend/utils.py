@@ -304,9 +304,10 @@ def _warn_deprecated_ascend_env_vars() -> None:
 
 
 def is_compile_on_910_95(arch: str = None) -> bool:
-    """Return whether the compilation target belongs to the Ascend 950 generation."""
+    """Return whether the target uses the A5/A6 register-based pipeline."""
     if arch is not None:
-        return isinstance(arch, str) and arch.startswith(("Ascend910_95", "Ascend950"))
+        return isinstance(arch, str) and (arch.startswith(("Ascend910_96", "Ascend960")) or arch.startswith(
+            ("Ascend910_95", "Ascend950")))
 
     global _is_compile_on_910_95
     if _is_compile_on_910_95 is None:
@@ -314,7 +315,8 @@ def is_compile_on_910_95(arch: str = None) -> bool:
             import acl
             name_lower = acl.get_soc_name().lower()
             _is_compile_on_910_95 = ("ascend910_95" in name_lower or "ascend950" in name_lower
-                                     or "910_958b" in name_lower)
+                                     or "910_958b" in name_lower or "ascend910_96" in name_lower
+                                     or "ascend960" in name_lower)
         except (ImportError, AttributeError):
             _is_compile_on_910_95 = False
     return _is_compile_on_910_95
@@ -1045,6 +1047,8 @@ def ub_size_in_kbytes_for_arch(arch: str) -> int:
     """
     if not isinstance(arch, str) or not arch:
         return 0
+    if arch.startswith(("Ascend910_96", "Ascend960")):
+        return 376
     if arch.startswith(("Ascend910_95", "Ascend950")):
         return 256
     if arch.startswith(("Ascend910A", "Ascend910B", "Ascend910D", "Ascend910_93", "Ascend310B")):
