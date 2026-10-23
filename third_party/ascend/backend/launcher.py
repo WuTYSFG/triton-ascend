@@ -40,7 +40,7 @@ _LAUNCHER_CFLAGS = ("-O2", )
 
 # Keep these values in sync with launcher_abi.h. These are data tags, not C++
 # spellings: a signature is decoded once when a native plan is constructed.
-CONSTEXPR, POINTER, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64 = range(12)
+CONSTEXPR, POINTER, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, F16, BF16 = range(14)
 FFTS, PURE_SIMT, TASKQUEUE, AUTO_MAP, GRID_WARNING, COALESCE_CEIL, DYNAMIC_SHARED, DEVICE_PRINT, IAT, PTSM, DOT_ROW = (
     1 << i for i in range(11))
 
@@ -56,8 +56,8 @@ _KINDS = {
     "u16": U16,
     "u32": U32,
     "u64": U64,
-    "fp16": F32,
-    "bf16": F32,
+    "fp16": F16,
+    "bf16": BF16,
     "fp32": F32,
     "f32": F32,
     "fp64": F64,
@@ -78,6 +78,8 @@ def ty_to_cpp(ty):
         U64: "uint64_t",
         F32: "float",
         F64: "double",
+        F16: "float",
+        BF16: "float",
     }[_KINDS[ty]]
 
 
