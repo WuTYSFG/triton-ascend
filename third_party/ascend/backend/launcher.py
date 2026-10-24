@@ -295,13 +295,9 @@ def _runtime_sources():
     })
 
 
-def _cache_relative(path):
-    return "/".join(Path(path).parts[-2:])
-
-
 @lru_cache(maxsize=32)
-def _runtime_config(npu_utils_relative, backend, print_identity):
-    config = f"#define TRITON_NPU_UTILS_RELATIVE {json.dumps(npu_utils_relative)}\n"
+def _runtime_config(npu_utils_path, backend, print_identity):
+    config = f"#define TRITON_NPU_UTILS_PATH {json.dumps(npu_utils_path)}\n"
     if backend == "mindspore":
         config += "#define TRITON_LAUNCHER_MINDSPORE\n"
     sources = {"launcher_config.h": config}
@@ -356,9 +352,7 @@ def get_runtime(npu_utils_path, debug=False):
         version_file = utils._find_cann_version_file()
         print_identity = (bisheng, utils._file_identity(bisheng), version_file,
                           utils._file_identity(version_file) if version_file else None)
-    sources = {
-        **_runtime_sources(), **_runtime_config(_cache_relative(npu_utils_path), utils.backend_policy, print_identity)
-    }
+    sources = {**_runtime_sources(), **_runtime_config(npu_utils_path, utils.backend_policy, print_identity)}
     path = _build_shared("__triton_launcher_runtime", sources, debug)
     return _load_runtime(path), path
 
@@ -367,7 +361,7 @@ def export_launcher(spec, types, runtime_path, debug=False):
     """Bind the legacy C ABI using constants and a fixed export adapter."""
     fields = ", ".join(str(value) for value in spec.as_dict().values())
     initializers = ", ".join(f"{{{kind}, {dtype}}}" for kind, dtype in types) or "{0, -1}"
-    config = (f"#define TRITON_EXPORT_RUNTIME_RELATIVE {json.dumps(_cache_relative(runtime_path))}\n"
+    config = (f"#define TRITON_EXPORT_RUNTIME_PATH {json.dumps(runtime_path)}\n"
               f"static constexpr TritonNpuLaunchSpecV1 spec = {{1, sizeof(TritonNpuLaunchSpecV1), {fields}}};\n"
               f"static constexpr TritonNpuArgTypeV1 types[] = {{{initializers}}};\n"
               f"static constexpr size_t numTypes = {len(types)};\n")

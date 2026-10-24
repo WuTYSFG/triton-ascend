@@ -69,7 +69,7 @@ struct BackendApi {
   void (*async)(void *, const char *);
 
   BackendApi() {
-    void *handle = openRuntime(TRITON_NPU_UTILS_RELATIVE);
+    void *handle = openRuntime(TRITON_NPU_UTILS_PATH);
     workspace = resolve<decltype(workspace)>(
         handle, "triton_allocate_workspace_on_stream");
     releaseWorkspace =

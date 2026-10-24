@@ -33,7 +33,7 @@ struct Adapter {
   PyObject *(*python_launcher)(const TritonNpuLaunchPlan *);
   TritonNpuLaunchPlan *plan;
   Adapter() {
-    void *runtime = triton::ascend::openRuntime(TRITON_EXPORT_RUNTIME_RELATIVE);
+    void *runtime = triton::ascend::openRuntime(TRITON_EXPORT_RUNTIME_PATH);
     auto create = triton::ascend::resolve<decltype(&triton_npu_create_plan_v1)>(
         runtime, "triton_npu_create_plan_v1");
     launch = triton::ascend::resolve<decltype(launch)>(runtime,

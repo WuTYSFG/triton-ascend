@@ -39,14 +39,51 @@ inline std::string cachePath(const char *relative) {
   return std::string(base) + "/.triton/cache/" + relative;
 }
 
-inline void *openRuntime(const char *relative) {
-  auto path = cachePath(relative);
-  // Keep the module loaded: enqueued callbacks may execute after the importing
-  // Python launcher or exported adapter has been released.
-  void *handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-  if (!handle)
-    throw std::runtime_error("dlopen " + path + " failed: " + dlerror());
-  return handle;
+inline void *openRuntime(const char *baked) {
+  if (baked == nullptr)
+    throw std::runtime_error("openRuntime: null runtime path");
+
+  const std::string path = baked;
+  // Keep the module loaded (never dlclose): enqueued callbacks may execute
+  // after the importing Python launcher or exported adapter has been released.
+  dlerror(); // Clear any pending error so the captured reason is attributable.
+  void *handle = dlopen(baked, RTLD_NOW | RTLD_LOCAL);
+  if (handle != nullptr)
+    return handle;
+  const char *bakedError = dlerror();
+  std::string message = "dlopen " + path + " failed: " +
+                        (bakedError != nullptr ? bakedError : "unknown error");
+  // Extract "<cache-key>/<file>" from the absolute path baked at build time so
+  // the artifact can be relocated under a repointed TRITON_CACHE_DIR; returns
+  // an empty string when the path carries no cache-key segment.
+  const auto cacheRelative = [&path]() -> std::string {
+    const size_t name = path.find_last_of('/');
+    if (name == std::string::npos || name == 0)
+      return {};
+    const size_t key = path.find_last_of('/', name - 1);
+    return key == std::string::npos ? std::string{} : path.substr(key + 1);
+  };
+  // The baked path is stale when TRITON_CACHE_DIR was repointed after build;
+  // retry the same artifact under the current cache root.
+  const std::string relative = cacheRelative();
+  if (!relative.empty()) {
+    try {
+      const std::string fallback = cachePath(relative.c_str());
+      dlerror();
+      handle = dlopen(fallback.c_str(), RTLD_NOW | RTLD_LOCAL);
+      if (handle != nullptr)
+        return handle;
+      const char *fallbackError = dlerror();
+      message += "; fallback dlopen " + fallback + " failed: " +
+                 (fallbackError != nullptr ? fallbackError : "unknown error");
+    } catch (const std::exception &e) {
+      // Environment fallback unavailable; report the baked path instead.
+      message += "; cache fallback unavailable: ";
+      message += e.what();
+    }
+  }
+
+  throw std::runtime_error(message);
 }
 
 template <typename T> T resolve(void *handle, const char *name) {

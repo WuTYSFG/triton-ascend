@@ -422,7 +422,9 @@ def test_preparation_cache_root_switch_and_deleted_artifacts(prepared_backend, m
         monkeypatch.setenv(setting, str(tmp_path / "new-cache"))
     second = state.driver.NPULauncher(state.src, metadata())
     assert second._runtime_path != first._runtime_path
-    assert Path(second._runtime_path).parent.name == Path(first._runtime_path).parent.name
+    # The helper's absolute path is baked into the runtime, so switching cache
+    # roots rebuilds the runtime under a key tied to the helper's new location.
+    assert Path(second._runtime_path).parent.name != Path(first._runtime_path).parent.name
     assert len(state.builds) == 4
     Path(second._runtime_path).unlink()
     helper = state.driver.NPUUtils().get_so_path()
@@ -431,6 +433,24 @@ def test_preparation_cache_root_switch_and_deleted_artifacts(prepared_backend, m
     assert third._runtime_path == second._runtime_path
     assert Path(third._runtime_path).exists() and Path(helper).exists()
     assert len(state.builds) == 6
+
+
+def test_runtime_rebuilds_when_inductor_repoints_cache_dir(prepared_backend, monkeypatch, tmp_path):
+    state = prepared_backend
+    first = state.driver.NPULauncher(state.src, metadata())
+    first_helper = state.driver.NPUUtils().get_so_path()
+    # PyTorch Inductor repoints TRITON_CACHE_DIR at a fresh temporary root
+    # (tempfile.mkdtemp) after the helper was already built: the launcher must
+    # rebuild against the helper's new location instead of resolving the
+    # stale restored value from the live environment.
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "inductor-temp"))
+    second = state.driver.NPULauncher(state.src, metadata())
+    second_helper = state.driver.NPUUtils().get_so_path()
+    assert second_helper != first_helper
+    assert Path(second_helper).parents[1] == tmp_path / "inductor-temp"
+    assert second._runtime_path != first._runtime_path
+    assert Path(first_helper).exists()
+    assert len(state.builds) == 4
 
 
 def test_debug_dump_and_lazy_export_after_preparation_reuse(prepared_backend, monkeypatch, tmp_path):
@@ -528,8 +548,7 @@ def test_preparation_preserves_existing_content_keys(prepared_backend):
     expected = hashlib.sha256(json.dumps([source, state.fingerprint], sort_keys=True).encode()).hexdigest()
     assert state.driver.NPUUtils().get_so_path() == get_cache_manager(expected).get_file("npu_utils.so")
     sources = launcher._runtime_sources()
-    config = launcher._runtime_config(launcher._cache_relative(state.driver.NPUUtils().get_so_path()),
-                                      utils.backend_policy, None)
+    config = launcher._runtime_config(state.driver.NPUUtils().get_so_path(), utils.backend_policy, None)
     key = hashlib.sha256(json.dumps([state.fingerprint, {**sources, **config}], sort_keys=True).encode()).hexdigest()
     assert Path(instance._runtime_path).parent.name == get_cache_manager(key).key
 
