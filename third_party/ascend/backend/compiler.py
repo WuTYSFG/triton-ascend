@@ -35,6 +35,7 @@ from types import ModuleType
 from typing import Any, Dict, Optional, Tuple, Union
 from .debug_line_rewriter import rewrite_debug_line
 
+from triton import knobs
 from triton._C.libtriton import ir, passes, ascend, buffer_ir
 from triton._C.libtriton.ascend import ir as ascend_ir
 try:
@@ -854,7 +855,7 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
 
         cmd_list = ([npu_compiler_path, ttadapter_path] + _compile_option_list + ["-o", bin_file])
 
-        if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
+        if opt.debug or knobs.autotuning.print:
             print_cmd_list = cmd_list.copy()
             print_cmd_list[1], print_cmd_list[-1] = _get_dump_paths(metadata["hash"], ttadapter_path, bin_path)
             print(f"[DEBUG] cmd_list: {shlex.join(print_cmd_list)}")
@@ -1068,7 +1069,7 @@ def linalg_to_bin_enable_npu_compile_A2_A3(linalg: str, metadata, opt):
 
         cmd_list = ([npu_compiler_path, ttadapter_path] + _compile_option_list + ["-o", bin_file])
 
-        if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
+        if opt.debug or knobs.autotuning.print:
             print_cmd_list = cmd_list.copy()
             print_cmd_list[1], print_cmd_list[-1] = _get_dump_paths(metadata["hash"], ttadapter_path, bin_path)
             print(f"[DEBUG] cmd_list: {shlex.join(print_cmd_list)}")

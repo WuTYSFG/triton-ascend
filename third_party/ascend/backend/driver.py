@@ -29,6 +29,7 @@ from typing import Optional
 import functools
 import hashlib
 from triton.runtime.cache import get_cache_manager
+from triton import knobs
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
 from triton.backends.ascend.utils import _build_npu_ext, get_backend_func
@@ -202,7 +203,7 @@ class NPUUtils(object):
 class NPULauncher(object):
 
     def __init__(self, src, metadata):
-        self.compile_only = os.getenv("TRITON_COMPILE_ONLY", 'false').lower() in ('true', '1')
+        self.compile_only = knobs.ascend.compile_only
         self.src = src
         self.metadata = metadata
         self.mix_mode = metadata.mix_mode

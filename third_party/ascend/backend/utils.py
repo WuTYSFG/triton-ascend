@@ -31,6 +31,7 @@ import warnings
 from pathlib import Path
 import logging
 import platform
+from triton import knobs
 from triton.backends.ascend.backend_register import backend_strategy_registry
 
 import pybind11
@@ -509,7 +510,7 @@ def _get_bishengir_opt_path() -> str:
     else:
         bishengir_opt_path = shutil.which("bishengir-opt")
         if bishengir_opt_path is None:
-            bishengir_opt_root = os.getenv("TRITON_NPU_COMPILER_PATH", "")
+            bishengir_opt_root = knobs.ascend.npu_compiler_path or ""
             if bishengir_opt_root is None:
                 raise EnvironmentError("Couldn't find executable bishengir-opt or TRITON_NPU_COMPILER_PATH")
             bishengir_opt_path = os.path.join(bishengir_opt_root, "bishengir-opt")
@@ -526,7 +527,7 @@ def _get_npucompiler_path() -> str:
     else:
         npu_compiler_path = shutil.which("bishengir-compile")
         if npu_compiler_path is None:
-            npu_compiler_root = os.getenv("TRITON_NPU_COMPILER_PATH", None)
+            npu_compiler_root = knobs.ascend.npu_compiler_path
             if npu_compiler_root is None:
                 raise EnvironmentError("Couldn't find executable bishengir-compile or TRITON_NPU_COMPILER_PATH.")
             npu_compiler_path = os.path.join(npu_compiler_root, "npuc")
@@ -536,7 +537,7 @@ def _get_npucompiler_path() -> str:
 def _get_bisheng_path() -> str:
     bisheng_path = shutil.which("bisheng")
     if bisheng_path is None:
-        npu_compiler_root = os.getenv("TRITON_NPU_COMPILER_PATH", None)
+        npu_compiler_root = knobs.ascend.npu_compiler_path
         if npu_compiler_root is None:
             raise EnvironmentError("Couldn't find executable bisheng or TRITON_NPU_COMPILER_PATH")
         bisheng_path = os.path.join(npu_compiler_root, "ccec")
@@ -610,7 +611,7 @@ def _get_ascend_path() -> Path:
 
 
 def _is_ascend_sanitizer_enabled() -> bool:
-    return os.getenv("TRITON_ENABLE_SANITIZER", "false").lower() in ("true", "1")
+    return knobs.ascend.enable_sanitizer
 
 
 def _is_debug_line_info_disabled() -> bool:
@@ -637,11 +638,11 @@ def _warn_auto_blockify_disabled(kernel_name: str, blacklist_reasons) -> None:
 
 
 def _enable_print_ub_bits() -> bool:
-    return os.getenv("ENABLE_PRINT_UB_BITS", "false").lower() in ("true", "1")
+    return knobs.ascend.print_ub_bits
 
 
 def _enable_dump_memory_info() -> bool:
-    return os.getenv("TRITON_MEMORY_DISPLAY", "false").lower() in ("true", "1")
+    return knobs.ascend.memory_display
 
 
 def _enable_msdebug() -> bool:

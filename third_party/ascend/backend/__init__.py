@@ -120,4 +120,8 @@ def _apply_ascend_patch():
             logging.warning(f"[Ascend Patch] Failed to install dtype guard: {e}")
 
 
+from .knobs import install_ascend_knobs as _install_ascend_knobs
+
+_install_ascend_knobs()
+
 __all__ = ["do_bench_npu"]
