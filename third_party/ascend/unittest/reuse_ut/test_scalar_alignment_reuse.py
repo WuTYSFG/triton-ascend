@@ -17,7 +17,6 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-
 """Does a runtime scalar divisible by 16 specialize and force a recompile?
 
 Mechanism (``python/src/specialize.cc``, ``handle_long_type``): an i32 scalar
@@ -86,8 +85,9 @@ def test_scalar_divisible_by_16_specialization(reuse_mode):
         kernel = launch_add(value, x, out, tile)
         kernels.append(kernel)
         key = kernel.src.signature["value"][1]  # observed specialization key
-        print(f"[reuse_mode={mode}] value={value:3d} spec_key={key!r} "
-              f"kernel=0x{id(kernel):x} loads_so_far={len(loads)}", flush=True)
+        print(
+            f"[reuse_mode={mode}] value={value:3d} spec_key={key!r} "
+            f"kernel=0x{id(kernel):x} loads_so_far={len(loads)}", flush=True)
 
     distinct = len({id(k) for k in kernels})
     print(f"[reuse_mode={mode}] summary: distinct_kernels={distinct} kernel_loads={len(loads)}", flush=True)
@@ -102,8 +102,7 @@ def test_scalar_divisible_by_16_specialization(reuse_mode):
     # Ascend default simd: alignment specialization is off, so every value gets
     # the same key and a single kernel is loaded - 16-divisibility does NOT
     # recompile. With simt_only the boundary would produce two loads.
-    assert len(loads) == 1, (
-        f"values crossing the 16-byte boundary must reuse one kernel under simd "
-        f"(got {len(loads)} loads, expected 1); simt_only would split into "
-        f"{len(keys_aligned)} specializations -> {len(keys_aligned)} loads")
+    assert len(loads) == 1, (f"values crossing the 16-byte boundary must reuse one kernel under simd "
+                             f"(got {len(loads)} loads, expected 1); simt_only would split into "
+                             f"{len(keys_aligned)} specializations -> {len(keys_aligned)} loads")
     assert distinct == 1

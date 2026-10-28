@@ -17,7 +17,6 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-
 """Does a constexpr TILE change recompile when tile reuse is enabled?
 
 Run on an NPU with a patched triton-ascend build::
@@ -67,7 +66,7 @@ def launch_copy(n, tile, src, dst):
     """Launch ``copy_kernel`` with one TILE and check the copy result."""
     # The grid contract is cdiv(N, TILE); dispatch recomputes it when it
     # schedules the launch onto a kernel compiled with a different TILE.
-    grid = lambda meta: (triton.cdiv(meta["N"], meta["TILE"]),)
+    grid = lambda meta: (triton.cdiv(meta["N"], meta["TILE"]), )
     kernel = copy_kernel[grid](src, dst, N=n, TILE=tile)
     torch.npu.synchronize()
     torch.testing.assert_close(dst, src)

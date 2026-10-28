@@ -17,7 +17,6 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-
 """Device-level observation tests: does changing constexpr SCALE recompile ``scale``?
 
 Run on an NPU with a patched triton-ascend build (the JIT reuse handoff must be
