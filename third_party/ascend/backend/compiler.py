@@ -829,6 +829,9 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
             if metadata.get("enable_vf_stack_limit"):
                 _compile_option_list += ["--enable-vf-stack-limit"]
         bisheng_options = metadata["bisheng_options"]
+        if metadata.get("cce_no_dcache_flush") and bisheng_options is not None:
+            if "--cce-no-dcache-flush" not in bisheng_options:
+                bisheng_options = bisheng_options + " --cce-no-dcache-flush"
         if bisheng_options is not None:
             _compile_option_list += [f"--append-bisheng-options={bisheng_options}"]
         if opt.debug:
@@ -1056,6 +1059,12 @@ def linalg_to_bin_enable_npu_compile_A2_A3(linalg: str, metadata, opt):
                 bishengir_hivm_opt,
                 "--enable-triton-kernel-compile=true",
             ]
+            # Inject --cce-no-dcache-flush via append-bisheng-options when
+            # requested by the template compile option.
+            if metadata.get("cce_no_dcache_flush"):
+                _compile_option_list += [
+                    "--append-bisheng-options=--cce-no-dcache-flush"
+                ]
 
         if opt.debug:
             _compile_option_list += ["--mlir-print-ir-after-failure"]
@@ -1217,6 +1226,10 @@ class NPUOptions:
     enable_hivm_batch_matmul: bool = False
     # Only takes effect on the Ascend 950 non-pure-SIMT BiShengIR compilation path.
     enable_vf_stack_limit: bool = False
+    # Skip full D-cache flush in kernel epilogue (replaces MOVI+DCCI with
+    # lightweight DSB+DCI).  Reduces aicore time significantly for mm kernels.
+    # Set via NPUTemplateCompileOption({"cce_no_dcache_flush": True}).
+    cce_no_dcache_flush: bool = False
     sync_solver: bool = None
     unit_flag: bool = None
     enable_flatten: bool = None
@@ -1464,6 +1477,9 @@ def ttir_to_npubin(mod, metadata, opt):
                     ]
 
             bisheng_options = metadata["bisheng_options"]
+            if metadata.get("cce_no_dcache_flush") and bisheng_options is not None:
+                if "--cce-no-dcache-flush" not in bisheng_options:
+                    bisheng_options = bisheng_options + " --cce-no-dcache-flush"
             if bisheng_options is not None:
                 _compile_option_list += [f"--append-bisheng-options={bisheng_options}"]
 
