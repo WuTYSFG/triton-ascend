@@ -210,6 +210,24 @@ private:
                             OpBuilder &builder);
 };
 
+// Decompose an AND-tree mask into its continuous and discrete leaf components
+// so that callers can use contMask to bound memory accesses while discMask
+// still drives the per-element selection.
+struct MaskDecomposition {
+  // AND of all leaves that MaskState::parse() can analyze as a rectangle mask.
+  // nullptr when no such leaves exist.
+  Value contMask;
+  // AND of all leaves that MaskState::parse() cannot analyze
+  // (discrete/runtime). nullptr when no such leaves exist.
+  Value discMask;
+};
+
+// Recursively collect the leaves of an arith::AndIOp tree rooted at `mask`,
+// split them with MaskState::parse()/isMask(), and AND each group back into a
+// single continuous mask and a single discrete mask value.
+MaskDecomposition decomposeAndMask(Value mask, const Location &loc,
+                                   PatternRewriter &rewriter);
+
 std::optional<MaskState> runMaskAnalysis(Operation *op, OpBuilder &builder);
 
 } // namespace triton

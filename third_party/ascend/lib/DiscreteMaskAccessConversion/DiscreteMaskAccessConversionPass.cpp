@@ -375,7 +375,9 @@ static bool checkAllProgramIdNonOverlap(ModuleOp module) {
 
 LogicalResult isDiscreteMask(Operation *op, Value mask,
                              PatternRewriter &rewriter) {
-  if (!mask || op->hasAttr(ConverterUtils::mixCompileDiscreteMaskAttrName)) {
+  if (!mask ||
+      op->hasAttr(ConverterUtils::mixCompileDiscreteMaskAttrName) ||
+      op->hasAttr(ConverterUtils::mixCompileAxisDiscreteMaskAttrName)) {
     return failure();
   }
 
@@ -388,81 +390,27 @@ LogicalResult isDiscreteMask(Operation *op, Value mask,
   return success();
 }
 
-// Recursively collect all leaf operands of a nested arith::AndIOp tree.
-// This function also normalizes masks by distributing broadcast over andi
-//   broadcast(andi(a, b)) = andi(broadcast(a), broadcast(b))
-// so that inner AND operands nested inside a broadcast are still reachable.
-static void collectAndLeaves(Value mask, SmallVectorImpl<Value> &leaves,
-                             Location loc, PatternRewriter &rewriter) {
-  if (auto andOp = mask.getDefiningOp<arith::AndIOp>()) {
-    collectAndLeaves(andOp.getLhs(), leaves, loc, rewriter);
-    collectAndLeaves(andOp.getRhs(), leaves, loc, rewriter);
-  } else if (auto broadcastOp = mask.getDefiningOp<triton::BroadcastOp>()) {
-    // Distribute broadcast over andi so we can inspect each factor separately.
-    if (auto innerAnd = broadcastOp.getSrc().getDefiningOp<arith::AndIOp>()) {
-      Type dstType = mask.getType();
-      Value broadcastA =
-          rewriter.create<triton::BroadcastOp>(loc, dstType, innerAnd.getLhs())
-              .getResult();
-      Value broadcastB =
-          rewriter.create<triton::BroadcastOp>(loc, dstType, innerAnd.getRhs())
-              .getResult();
-      collectAndLeaves(broadcastA, leaves, loc, rewriter);
-      collectAndLeaves(broadcastB, leaves, loc, rewriter);
-    } else {
-      leaves.push_back(mask);
-    }
-  } else {
-    leaves.push_back(mask);
-  }
+static bool isAxisDiscreteMask(Value mask) {
+  if (auto andOp = mask.getDefiningOp<arith::AndIOp>())
+    return isAxisDiscreteMask(andOp.getLhs()) &&
+           isAxisDiscreteMask(andOp.getRhs());
+  return isa_and_nonnull<triton::BroadcastOp>(mask.getDefiningOp());
 }
 
-struct MaskDecomposition {
-  // AND of all leaves that MaskState::parse() can analyze as a rectangle mask.
-  // nullptr when no such leaves exist.
-  Value contMask;
-  // AND of all leaves that MaskState::parse() cannot analyze
-  // (discrete/runtime). nullptr when no such leaves exist.
-  Value discMask;
-};
-
-// Decompose an AND-tree mask into its continuous and discrete leaf components
-// so that we can use contMask to bound GM accesses while discMask still drives
-// the per-element selection.
-static MaskDecomposition decomposeAndMask(Operation *op, Value mask,
-                                          const Location &loc,
-                                          PatternRewriter &rewriter) {
-  SmallVector<Value> leaves;
-  collectAndLeaves(mask, leaves, loc, rewriter);
-
-  SmallVector<Value> contLeaves;
-  SmallVector<Value> discLeaves;
-
-  for (Value leaf : leaves) {
-    MaskState st;
-    if (st.parse(leaf, loc, rewriter).succeeded()) {
-      if (st.isMask())
-        contLeaves.push_back(leaf);
-      else
-        discLeaves.push_back(leaf);
-    } else {
-      discLeaves.push_back(leaf);
-    }
-  }
-
-  Value contMask = nullptr;
-  for (Value v : contLeaves)
-    contMask =
-        contMask ? rewriter.create<arith::AndIOp>(loc, contMask, v).getResult()
-                 : v;
-
-  Value discMask = nullptr;
-  for (Value v : discLeaves)
-    discMask =
-        discMask ? rewriter.create<arith::AndIOp>(loc, discMask, v).getResult()
-                 : v;
-
-  return {contMask, discMask};
+static bool isAxisDiscreteMaskLoad(triton::LoadOp op) {
+  auto ptrType = dyn_cast<RankedTensorType>(op.getPtr().getType());
+  auto maskType = dyn_cast<RankedTensorType>(op.getMask().getType());
+  
+  // FIXME: Only 2D pointers and masks are currently supported. The
+  // axis-discrete mask optimization needs generalizing to other ranks.
+  if (!ptrType || !maskType || ptrType.getRank() != 2)
+    return false;
+  auto shape = ptrType.getShape();
+  if (shape[0] <= 0 || shape[1] <= 0)
+    return false;
+  if (maskType.getShape() != shape)
+    return false;
+  return isAxisDiscreteMask(op.getMask());
 }
 
 struct DiscreteMaskStoreConversion : OpRewritePattern<triton::StoreOp> {
@@ -496,7 +444,7 @@ struct DiscreteMaskStoreConversion : OpRewritePattern<triton::StoreOp> {
     // When mask = contMask & discMask, use contMask to bound GM accesses and
     // discMask to select the final per-element value. This prevents the
     // unguarded full-load from reading past the tail-block boundary.
-    auto [contMask, discMask] = decomposeAndMask(op, mask, loc, rewriter);
+    auto [contMask, discMask] = decomposeAndMask(mask, loc, rewriter);
     if (contMask && discMask) {
       // insert sync_block_lock (unordered: see markSyncBlockLockUnordered)
       auto lockVar = MemOpConverter::createSyncBlockLockVar(rewriter, loc);
@@ -569,6 +517,16 @@ struct DiscreteMaskLoadConversion : OpRewritePattern<triton::LoadOp> {
     if (failed(isDiscreteMask(op, mask, rewriter)))
       return failure();
 
+    // Axis-discrete mask (discrete only along a single axis): tag the load
+    // for TritonToUnstructure instead of rewriting it here (routing it to
+    // the indirect SIMT gather / SIMD bounded load below).
+    // FIXME: only support compileOn91095
+    if (compileOn91095Flag && isAxisDiscreteMaskLoad(op)) {
+      op->setAttr(ConverterUtils::mixCompileAxisDiscreteMaskAttrName,
+                  rewriter.getUnitAttr());
+      return success();
+    }
+
     auto ptrType = dyn_cast<RankedTensorType>(ptr.getType());
     bool rankWithinIndirectFastPathLimit =
         ptrType && ptrType.getShape().size() <= 5;
@@ -577,13 +535,13 @@ struct DiscreteMaskLoadConversion : OpRewritePattern<triton::LoadOp> {
         rankWithinIndirectFastPathLimit) {
       op->setAttr(ConverterUtils::mixCompileDiscreteMaskAttrName,
                   rewriter.getUnitAttr());
-      return failure();
+      return success();
     }
 
     // SIMD path: when mask = contMask & discMask, load only the safe range
     // defined by contMask and use discMask for the per-element select,
     // avoiding OOB reads.
-    auto [contMask, discMask] = decomposeAndMask(op, mask, loc, rewriter);
+    auto [contMask, discMask] = decomposeAndMask(mask, loc, rewriter);
     if (contMask && discMask) {
       if (!other) {
         FailureOr<Value> constant = specializeTypelessValueToConstant(
@@ -694,8 +652,8 @@ struct DiscreteMaskAtomicConversion
       return failure();
     }
 
-    auto [contMask, discMask] = decomposeAndMask(op, mask, loc, rewriter);
-    FailureOr<mlir::Value> fill = specializeTypelessValueToConstant(
+    auto [contMask, discMask] = decomposeAndMask(mask, loc, rewriter);
+    FailureOr<Value> fill = specializeTypelessValueToConstant(
         typelessVal, src.getType(), loc, rewriter);
     if (failed(fill)) {
       LLVM_DEBUG({
