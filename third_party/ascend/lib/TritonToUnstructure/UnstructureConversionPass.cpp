@@ -661,6 +661,8 @@ static LogicalResult rewriteAxisDiscreteMaskLoad(triton::LoadOp op,
         loc, RankedTensorType::get(shape, elemType), other);
   auto forOp =
       rewriter.create<scf::ForOp>(loc, c0, bound, c1, ValueRange({fill}));
+  forOp->setAttr("ExtractedLoadOrStore", rewriter.getUnitAttr());
+  forOp->setAttr(hivm::ParallelLoopAttr::name, rewriter.getUnitAttr());
   Value acc = forOp.getRegionIterArg(0);
   {
     OpBuilder::InsertionGuard guard(rewriter);

@@ -56,3 +56,36 @@ tt.func public @block_ptr_load_skip_indirect(%arg0: !tt.ptr<f32>) -> tensor<32x3
 
 // CHECK-LABEL: tt.func public @block_ptr_load_skip_indirect
 // CHECK-NOT: ascend.indirect_load
+
+// -----
+
+// Keep the mask, row address and load in one gather loop during CV splitting.
+// CHECK-LABEL: @axis_discrete_row_gather
+// CHECK: scf.for
+// CHECK: scf.if
+// CHECK: tt.load
+// CHECK: tensor.insert_slice
+// CHECK: } {ExtractedLoadOrStore, hivm.parallel_loop}
+tt.func @axis_discrete_row_gather(%data: !tt.ptr<bf16>, %indices: !tt.ptr<i32>) -> tensor<16x16xbf16> {
+  %zero = arith.constant dense<0> : tensor<16xi32>
+  %stride = arith.constant dense<16> : tensor<16xi32>
+  %other = arith.constant dense<0.0> : tensor<16x16xbf16>
+  %range = tt.make_range {start = 0 : i32, end = 16 : i32} : tensor<16xi32>
+  %idx_base = tt.splat %indices : !tt.ptr<i32> -> tensor<16x!tt.ptr<i32>>
+  %idx_ptr = tt.addptr %idx_base, %range : tensor<16x!tt.ptr<i32>>, tensor<16xi32>
+  %idx = tt.load %idx_ptr : tensor<16x!tt.ptr<i32>>
+  %valid = arith.cmpi sge, %idx, %zero : tensor<16xi32>
+  %safe_idx = arith.select %valid, %idx, %zero : tensor<16xi1>, tensor<16xi32>
+  %rows = arith.muli %safe_idx, %stride : tensor<16xi32>
+  %rows_2d = tt.expand_dims %rows {axis = 1 : i32} : tensor<16xi32> -> tensor<16x1xi32>
+  %cols_2d = tt.expand_dims %range {axis = 0 : i32} : tensor<16xi32> -> tensor<1x16xi32>
+  %row_offsets = tt.broadcast %rows_2d : tensor<16x1xi32> -> tensor<16x16xi32>
+  %col_offsets = tt.broadcast %cols_2d : tensor<1x16xi32> -> tensor<16x16xi32>
+  %offsets = arith.addi %row_offsets, %col_offsets : tensor<16x16xi32>
+  %base = tt.splat %data : !tt.ptr<bf16> -> tensor<16x16x!tt.ptr<bf16>>
+  %ptr = tt.addptr %base, %offsets : tensor<16x16x!tt.ptr<bf16>>, tensor<16x16xi32>
+  %valid_2d = tt.expand_dims %valid {axis = 1 : i32} : tensor<16xi1> -> tensor<16x1xi1>
+  %mask = tt.broadcast %valid_2d : tensor<16x1xi1> -> tensor<16x16xi1>
+  %value = tt.load %ptr, %mask, %other : tensor<16x16x!tt.ptr<bf16>>
+  tt.return %value : tensor<16x16xbf16>
+}
