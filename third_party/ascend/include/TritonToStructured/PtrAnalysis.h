@@ -118,9 +118,16 @@ public:
   bool operandIsScalar(Value operand);
 
   bool optimizeDynamicOffset;
+  // Whether to allow a tt.load result (integer tensor) to be used as an
+  // opaque data-dependent offset (dynamicOffsets). Only enabled by the
+  // ImplicitPermute path (createNewAddPtr) for partially structured pointer
+  // scenarios; all other consumers keep the legacy behavior.
+  bool enableDataTensorOffset = false;
 
-  PtrAnalysis(bool optimizeDynamicOffset = false)
-      : optimizeDynamicOffset(optimizeDynamicOffset) {}
+  PtrAnalysis(bool optimizeDynamicOffset = false,
+              bool enableDataTensorOffset = false)
+      : optimizeDynamicOffset(optimizeDynamicOffset),
+        enableDataTensorOffset(enableDataTensorOffset) {}
 
   LogicalResult initStateByScalar(Value operand, PtrState &state,
                                   const Location loc, OpBuilder &builder);

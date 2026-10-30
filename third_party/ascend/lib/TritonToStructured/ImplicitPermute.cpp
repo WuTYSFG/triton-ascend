@@ -54,7 +54,9 @@ LogicalResult LoadConverter::matchAndRewrite(triton::LoadOp op,
   auto oldMask = op.getMask();
   auto oldOther = op.getOther();
 
-  MemOpTransformer tf(MemOpTransformer::MemType::load);
+  // enableDataTensorOffset: only the ImplicitPermute path accepts a tt.load
+  // result (integer tensor) as an opaque data-dependent offset.
+  MemOpTransformer tf(MemOpTransformer::MemType::load, false, true);
 
   Value newPtr = nullptr;
   if (oldPtr.getDefiningOp<triton::MakeTensorPtrOp>()) {
@@ -111,7 +113,7 @@ LogicalResult StoreConverter::matchAndRewrite(triton::StoreOp op,
   auto oldMask = op.getMask();
   auto oldValue = op.getValue();
 
-  MemOpTransformer tf(MemOpTransformer::MemType::store);
+  MemOpTransformer tf(MemOpTransformer::MemType::store, false, true);
   Value newPtr = nullptr;
   if (oldPtr.getDefiningOp<triton::MakeTensorPtrOp>()) {
     newPtr = tf.createNewTensorPtr(oldPtr, loc, rewriter);
@@ -165,7 +167,7 @@ AtomicRMWConverter::matchAndRewrite(triton::AtomicRMWOp op,
   auto oldMask = op.getMask();
   auto oldVal = op.getVal();
 
-  MemOpTransformer tf(MemOpTransformer::MemType::store);
+  MemOpTransformer tf(MemOpTransformer::MemType::store, false, true);
 
   Value newPtr = nullptr;
   if (oldPtr.getDefiningOp<triton::AddPtrOp>()) {
@@ -201,7 +203,7 @@ AtomicRMWConverter::matchAndRewrite(triton::AtomicRMWOp op,
 
   // The returned old value should be in OLD layout for users => permute back
   // (load-side).
-  MemOpTransformer tfLoad(MemOpTransformer::MemType::load);
+  MemOpTransformer tfLoad(MemOpTransformer::MemType::load, false, true);
   tfLoad.ptrState = tf.ptrState;
   Value permutedRes =
       tfLoad.materializeImplicitPermute(newAtomic.getResult(), loc, rewriter);
@@ -218,7 +220,7 @@ AtomicCASConverter::matchAndRewrite(triton::AtomicCASOp op,
   auto oldCmp = op.getCmp();
   auto oldVal = op.getVal();
 
-  MemOpTransformer tf(MemOpTransformer::MemType::store);
+  MemOpTransformer tf(MemOpTransformer::MemType::store, false, true);
 
   Value newPtr = nullptr;
   if (oldPtr.getDefiningOp<triton::AddPtrOp>()) {
@@ -247,7 +249,7 @@ AtomicCASConverter::matchAndRewrite(triton::AtomicCASOp op,
   newAtomic->setAttr(ImplicitPermuteHandledTAG,
                      UnitAttr::get(rewriter.getContext()));
 
-  MemOpTransformer tfLoad(MemOpTransformer::MemType::load);
+  MemOpTransformer tfLoad(MemOpTransformer::MemType::load, false, true);
   tfLoad.ptrState = tf.ptrState;
   Value permutedRes =
       tfLoad.materializeImplicitPermute(newAtomic.getResult(), loc, rewriter);

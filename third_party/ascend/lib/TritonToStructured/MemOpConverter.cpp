@@ -598,6 +598,9 @@ Value MemOpTransformer::createNewPtr(Value oldPtr, const Location loc,
   OpFoldResult maxStride = rewriter.getIndexAttr(1);
   for (auto it = ptrState.stateInfo.rbegin(); it != ptrState.stateInfo.rend();
        ++it) {
+    if (auto strideVal = dyn_cast<Value>(it->stride);
+        strideVal && isa<RankedTensorType>(strideVal.getType()))
+      continue; // data axis: dynamic stride, not part of the affine layout
     if (TritonToStructured::isOne(it->shape) && isZero(it->stride)) {
       it->stride = maxStride;
     }
@@ -618,7 +621,8 @@ Value MemOpTransformer::createNewPtr(Value oldPtr, const Location loc,
 
 Value MemOpTransformer::createNewAddPtr(Value oldPtr, const Location loc,
                                         PatternRewriter &rewriter) {
-  TritonToStructured::PtrAnalysis ptrAnalysis(optimizeDynamicOffset);
+  TritonToStructured::PtrAnalysis ptrAnalysis(optimizeDynamicOffset,
+                                              enableDataTensorOffset);
 
   LLVM_DEBUG({
     llvm::dbgs() << "----------------------------------------------\n";
@@ -641,6 +645,9 @@ Value MemOpTransformer::createNewAddPtr(Value oldPtr, const Location loc,
   OpFoldResult maxStride = rewriter.getIndexAttr(1);
   for (auto it = ptrState.stateInfo.rbegin(); it != ptrState.stateInfo.rend();
        ++it) {
+    if (auto strideVal = dyn_cast<Value>(it->stride);
+        strideVal && isa<RankedTensorType>(strideVal.getType()))
+      continue; // data axis: dynamic stride, not part of the affine layout
     if (TritonToStructured::isOne(it->shape) && isZero(it->stride)) {
       it->stride = maxStride;
     }

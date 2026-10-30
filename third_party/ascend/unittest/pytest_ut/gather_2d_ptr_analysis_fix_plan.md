@@ -2,12 +2,13 @@
 
 > 本文档用于把当前工作交接给接手人。目标场景、根因、具体改动点、验证步骤均已梳理，接手人可直接按第 4 节落地，按第 6 节验证。
 >
-> 涉及文件（改动集中在 PtrAnalysis，两个 pass 共用）：
-> - `third_party/ascend/include/TritonToStructured/PtrAnalysis.h`
-> - `third_party/ascend/lib/TritonToStructured/PtrAnalysis.cpp`
-> - `third_party/ascend/lib/TritonToStructured/ImplicitPermute.cpp`（消费方，基本不用改）
-> - `third_party/ascend/lib/TritonToStructured/MemOpConverter.cpp`（消费方，需回归确认）
-> - 测试：`third_party/ascend/unittest/pytest_ut/gather_2d_test.py`（Variant A）
+> 涉及文件（改动集中在 PtrAnalysis，两个 pass 共用；已完成"影响评估 + 开关门控"收敛，见第 9 节）：
+> - `third_party/ascend/include/TritonToStructured/PtrAnalysis.h`（新增 `enableDataTensorOffset` 开关）
+> - `third_party/ascend/lib/TritonToStructured/PtrAnalysis.cpp`（tt.load 门控、createAddPtrOp 双路径重建）
+> - `third_party/ascend/include/TritonToStructured/MemOpConverter.h`（`MemOpTransformer` 透传开关）
+> - `third_party/ascend/lib/TritonToStructured/MemOpConverter.cpp`（`createNewAddPtr` 打开开关、compute-missing-strides 跳过数据轴）
+> - `third_party/ascend/lib/TritonToStructured/ImplicitPermute.cpp`（4 处 `MemOpTransformer` 构造点传 `false, true`）
+> - 测试：`third_party/ascend/unittest/pytest_ut/test_gather_2d.py`（Variant A/C/B）
 
 ---
 
@@ -155,15 +156,23 @@ SmallVector<Value> dynamicOffsets;
 - `updatePtrState()`（L85-88）：参数链中透传 dynamicOffsets（或由调用方在返回前手动赋值）。
 - `dump()`（L71）：打印数据项，便于 LLVM_DEBUG 排障。
 
-### 改动点 ②：`visitOperand` 新增"数据张量"分支
+### 改动点 ②：`visitOperand` 新增"数据张量"分支（**必须门控**）
 
-把 `tt.load` 分支从"failure"改为"构造数据轴状态"：
+把 `tt.load` 分支从"failure"改为"构造数据轴状态"，**但仅当开关打开时**（见第 9 节 gating 方案）：
 
 ```cpp
 } else if (auto op = operand.getDefiningOp<triton::LoadOp>()) {
-  if (isIntegerTensorLike(operand))       // 元素类型为整数/index 的数据张量
-    return visitOperandDataTensor(op->getResult(0), state, loc, builder);
-  return failure();                        // fp 数据张量仍拒绝（精度不确定）
+  auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
+  if (enableDataTensorOffset && tensorType &&
+      tensorType.getElementType().isIntOrIndex()) {
+    return visitOperandDataTensor(operand, state, loc, builder);
+  }
+  LLVM_DEBUG({
+    op.emitRemark("TritonToStructured: Invalid dynamic offset"
+                  "The load operation's offset cannot be derived from "
+                  "another load result.");
+  });
+  return failure();
 }
 ```
 
@@ -176,6 +185,9 @@ LogicalResult PtrAnalysis::visitOperandDataTensor(Value operand, PtrState &state
 ```
 
 注意点：
+- **`enableDataTensorOffset` 默认 `false`**：`PtrAnalysis` 新增该成员（构造函数第二参数）。只有
+  ImplicitPermute 的 `createNewAddPtr`（经 `MemOpTransformer` 透传）把它置 true；其余消费者（
+  `createNewPtr` 线性化路径、`StridedLoadStoreRewrite` 等）保持默认，恢复旧"失败语义"，见第 9 节。
 - 该分支放在 `visitOperand` 的 if-else 链中（`tt.load` 位置），确保 `[1, BLOCK_M]`（或广播后 `[BLOCK_N, BLOCK_M]`）都能命中。
 - `knownPtrs` 命中分支（L1321-1324）和 `operandIsScalar`（L1326）在它之前，顺序不变。
 - 走到数据张量分支时，`state.sizes` 应按数据张量的实际 shape 填充（广播前的 `[1, BLOCK_M]`）。
@@ -216,31 +228,61 @@ if (rhs->isScalar() && !lhs->dynamicOffsets.empty() &&
 - `isSameSizeAs` **无需改动**：保持只比 `sizes`，两侧 block 形状相同即放行（含"一侧只有结构化轴、另一侧只有数据轴"的情形）；
   数据项的形状对齐/相加在下面的合并逻辑里做。
 
-### 改动点 ⑤：重建 addptr 时把数据项折回 offset
+### 改动点 ⑤：重建 addptr 时把数据项折回 offset（**双路径**）
 
 **文件**：
-- [PtrAnalysis.cpp createAddPtrOp L604-690](file:///d:/code/triton-ascend/third_party/ascend/lib/TritonToStructured/PtrAnalysis.cpp#L604-L690)
-- [ImplicitPermute.cpp createNewAddPtr L341-373](file:///d:/code/triton-ascend/third_party/ascend/lib/TritonToStructured/ImplicitPermute.cpp#L341-L373)
+- [PtrAnalysis.cpp createAddPtrOp](file:///d:/code/triton-ascend/third_party/ascend/lib/TritonToStructured/PtrAnalysis.cpp#L688-L910)
+- [MemOpConverter.cpp createNewAddPtr / createNewPtr](file:///d:/code/triton-ascend/third_party/ascend/lib/TritonToStructured/MemOpConverter.cpp#L575-L660)
 
-`createAddPtrOp` 目前重建 `base + Σ stride_i*arange_i + offset`（L649-683）。改造：
+`createAddPtrOp` 是**两个 pass 共用的重建函数**（线性化的 `createNewPtr` 和 ImplicitPermute 的 `createNewAddPtr`）。
+为不破坏线性化路径（bug A/B 见第 9 节），按"是否携带数据项"分双路径重建：
 
 ```cpp
-// 在 rangeAfterCombine 之后：
-Value finalOffset = rangeAfterCombine;
-for (Value data : state.dynamicOffsets)
-  finalOffset = builder.create<arith::AddIOp>(loc, finalOffset,
-      builder.create<triton::BroadcastOp>(loc, broadCastType, data));
-// 再把 offset 加进 finalOffset，生成 tt.addptr(source, finalOffset)
+const bool hasDataOffsets = !dynamicOffsets.empty();
+if (!hasDataOffsets) {
+  // 纯仿射路径：逐位恢复旧版行为 —— 跳过零 stride 轴，重建 reduced-rank addptr，
+  // 由 materializeImplicitBroadcast 还原满秩 load。shape 取自 stateInfo[id].shape。
+  for (auto id : permuteIds) {
+    auto info = stateInfo[id];
+    if (isZero(info.stride)) continue;
+    tensorStrides.emplace_back(info.stride);
+    tensorSizes.emplace_back(getIntAttr(info.shape).value());
+  }
+} else {
+  // 数据路径：满秩 tile。仿射/数据轴取 stateInfo[id].shape；
+  // 纯数据 state（stateInfo 空）回退到 sizes。注意 sizes 可能比 stateInfo 短
+  // （div/rem 拆轴），必须做越界保护（id < sizes.size()）。
+  ...
+}
 ```
 
-产物与原始 `tt.addptr %in_ptr1, %addr` 等价 → 下游（线性化/逐元素路径、UnstructureConversionPass）
-天然兼容，不改变非结构化访存语义。
+range 重建统一收进 `emitAffineRange(stride, tilePos)` lambda（跳过零 stride 轴与张量 Value stride 的数据轴），
+数据路径用 `stateInfo[permuteIds[i]].stride` 驱动，纯仿射路径用 `tensorStrides[i]` 驱动。
+
+数据对齐段（把 `dynamicOffsets[k]` broadcast 到**原始完整 block 布局**再按 `permuteIds` 转置进 tile）：
+`origSizes` 不能再直接取 `sizes`（在 Variant A 里 sizes=`[1, BLOCK_M]`，会缺 BLOCK_N 轴导致 rank/尺寸错配），
+必须按 dimIndex 从 `stateInfo[d].shape` 取值、缺失维回退 `sizes[d]`：
+
+```cpp
+const size_t fullRank = std::max(permuteIds.size(), sizes.size());
+for (size_t d = 0; d < fullRank; ++d) {
+  std::optional<int64_t> v;
+  if (d < permuteIds.size())
+    v = getIntAttr(stateInfo[d].shape);
+  if (!v.has_value() && d < sizes.size())
+    v = getIntAttr(sizes[d]);
+  ...
+  origSizes.emplace_back(v.value());
+}
+// dataTile = broadcast(data, origSizes) -> trans(permuteIds) -> AddIOp(rangeAfterCombine)
+```
+
+正确产物（Variant A）：tile=`[BLOCK_M, BLOCK_N]`，`addr[j,i] = offsets_x[j]*N + i`，等价 C 的 load 指针。
 
 注意：
-- `createNewAddPtr` 的零 stride 修复循环（ImplicitPermute.cpp L362-370）：`isZero`/`maxOpFoldResult`
-  对动态 Value stride 返回 false/原值，不会误伤数据项，无需改动；但要确认数据项不会以 stride 形式进入该循环。
-- `MemOpConverter.cpp` 的 `createNewPtr`（TritonToStructured 侧）与 `shouldLinearize` 逻辑（约 L565-607）
-  共用同一 PtrState：请回归确认"数据轴"不触发误线性化/不破坏现有行为。
+- `createNewAddPtr` 的零 stride 修复循环（compute-missing-strides）：对张量 Value stride 直接 `continue` 跳过，
+  避免 `maxOpFoldResult` 返回空 OpFoldResult 污染后续 stride（见第 9 节中风险 2）。
+- `MemOpConverter.cpp` 的 `createNewPtr` 保持默认 `enableDataTensorOffset=false`，`shouldLinearize` 逻辑不变。
 
 ---
 
@@ -327,3 +369,61 @@ valt       = tt.trans(val)                                  # [N, M]，由 mater
    数据轴以**动态 stride** 参与 `analyzePermute` 排序，但 `createAddPtrOp` 重建时从 dynamicOffsets 整张量相加，不走 `stride*arange`。
 4. 转置是目标（A→C）：permuteIds=[1,0] + load 结果插 `tt.trans`；前提是数据轴进 stateInfo 且重建避开 `stride*arange` 陷阱。
 5. 若最终关心的是 scf.for 拆分数量，改动点是 UnstructureConversionPass 的 32 字节 guard，而非 PtrAnalysis。
+6. **PtrAnalysis 被多 pass/多 converter 共用**：tt.load 放行、createAddPtrOp 双路径、mulState 的
+   stable_sort 都必须以 `enableDataTensorOffset`/`dynamicOffsets` 门控，其余消费者保持旧行为（见第 9 节）。
+
+---
+
+## 9. 影响评估与兼容性修复（已实施）
+
+> 本节记录对已提交改动（bba097c8c / 1ee145f93）的消费方影响评审，以及为收敛到"仅 ImplicitPermute 使用"所做的修复。
+> 核心原则：**数据依赖偏移是 ImplicitPermute 专属能力**；开关默认关闭，只有 `createNewAddPtr` 打开。
+
+### 9.1 消费方清单（谁在用 PtrAnalysis / createAddPtrOp）
+
+| 消费者 | 位置 | 用途 | 受影响？ |
+| --- | --- | --- | --- |
+| `MemOpConverter::createNewPtr` | MemOpConverter.cpp L575 | TritonToStructured 线性化路径（LoadConverter/StoreConverter） | 共用 createAddPtrOp + visitOperand → **需门控** |
+| `MemOpConverter::createNewAddPtr` | MemOpConverter.cpp L619 | ImplicitPermute 路径（LoadConverter/StoreConverter/AtomicRMW/AtomicCAS） | **目标路径，打开开关** |
+| `MemOpConverter::createNewTensorPtr/AdvancePtr` | MemOpConverter.cpp L654+ | block_ptr（make_tensor_ptr）路径 | visitOperand 共用 → 门控后无影响 |
+| `StridedLoadStoreRewrite`（TritonToGraph LegacyMemoryAccess） | LegacyMemoryAccess/StridedLoadStoreRewrite.cpp L705/L1029 | 直接构造 `PtrAnalysis ptrAnalysis;` | 默认 false → 恢复旧行为 |
+| `MaskAnalysis` / `CannonicalizerConverter` | — | 只用自由函数（isMultiple/isEqual/isLess/getIntAttr），**不用 PtrState** | 无影响 |
+| `PtrState::createAddPtrOp` | PtrAnalysis.cpp L688 | 上述 createNewPtr/createNewAddPtr 共用 | 见 bug A/B |
+
+### 9.2 已提交代码中的两个高影响 bug（本次修复）
+
+**Bug A —— `sizes[id]` 越界（UB）**：用户版 createAddPtrOp 用 `getIntAttr(sizes[id])` 构建 tensorSizes，
+但 div/rem 拆轴会让 `stateInfo.size() > sizes.size()`（parseCmp 用例 sizes=[1024]、stateInfo 2 项、
+permuteIds=[0,1] → `sizes[1]` 越界）。影响**线性化路径与 ImplicitPermute 路径**。
+修复：纯仿射路径改从 `stateInfo[id].shape` 构建（与旧版逐位一致）；数据路径对 `sizes` 回退做 `id < sizes.size()` 越界保护。
+
+**Bug B —— 满秩 addptr 与 materializeImplicitBroadcast 不匹配（非法 IR）**：新版 tensorSizes 不再排除零 stride
+广播轴 → load 结果满秩，但 `materializeImplicitBroadcast` 仍执行 `linalg.broadcast`（src rank == dst rank）
+→ verifier 报错；旧版是 reduced-rank addptr + broadcast 还原。
+修复：纯仿射路径恢复"跳过零 stride 轴、重建 reduced-rank addptr"；数据路径才需要满秩 tile。
+
+### 9.3 中风险：visitOperand 放行 tt.load 改变了所有消费方的"失败语义"
+
+用户版无条件放行 `tt.load` 整数张量 → `createNewPtr`/`StridedLoadStoreRewrite` 等原本会 failure 的指针
+现在会继续解析并生成数据项，行为不可控。**gating 方案**：
+
+- `PtrAnalysis` 新增 `bool enableDataTensorOffset = false;`（构造函数第二参数），`visitOperand` 的 tt.load 分支加 `enableDataTensorOffset &&` 条件。
+- `MemOpTransformer` 新增同名成员并透传（构造函数第三参数）；`createNewAddPtr` 用
+  `PtrAnalysis(optimizeDynamicOffset, enableDataTensorOffset)`，`createNewPtr`/`createNewTensorPtr` 保持默认。
+- ImplicitPermute.cpp 全部 6 处构造点传 `(MemType, false, true)`（Load/Store/AtomicRMW/AtomicCAS 及两处 tfLoad）。
+- 其余消费者（线性化、block_ptr、StridedLoadStoreRewrite）不传 → 默认 false → 恢复旧失败语义。
+
+### 9.4 其他低风险点（一并收敛）
+
+- **`mulState` 的 stable_sort（按 dimIndex 排序）**：这是为数据轴注入的 layoutDim 排序准备的，
+  对纯仿射路径改变了 stateInfo 顺序 → 收进 `if (!lhs->dynamicOffsets.empty())`（数据场景才排序）。
+- **`isEmpty`/`isScalar`/`addState` 新分支**：dynamicOffsets 为空时逐位等价于旧行为，无需改动。
+- **compute-missing-strides 循环（MemOpConverter 两处）**：`maxOpFoldResult` 对张量 Value 返回**空 OpFoldResult**，
+  若数据轴以 stride 形式进入该循环，`it->stride = maxStride` 可能写入空值、`materializeValue(空)` 崩溃。
+  修复：循环开头对张量 Value stride `continue` 跳过数据轴。
+
+### 9.5 回归验证
+
+- 纯仿射路径：跑 TritonToStructured 线性化用例（parseCmp.mlir 等 CHECK 用例）确认 reduced-rank addptr 与旧版一致。
+- 数据路径：`test_gather_2d.py` Variant A/C/B 精度一致（A 与 C 逐位相同）。
+- 开关默认值：确认未启用 ImplicitPermute 的用例（线性化、StridedLoadStoreRewrite）输出无 diff。

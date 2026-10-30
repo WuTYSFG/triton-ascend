@@ -497,10 +497,13 @@ LogicalResult PtrState::mulState(const PtrState &lhsState,
   }
 
   // analyzePermute / countContiguousAxes expect stateInfo ordered by dimIndex.
-  std::stable_sort(newStateInfo.begin(), newStateInfo.end(),
-                   [](const StateInfo &a, const StateInfo &b) {
-                     return a.dimIndex < b.dimIndex;
-                   });
+  // Only needed when data axes (which carry a layoutDim) were injected above;
+  // the pure affine path preserves the original visit order.
+  if (!lhs->dynamicOffsets.empty())
+    std::stable_sort(newStateInfo.begin(), newStateInfo.end(),
+                     [](const StateInfo &a, const StateInfo &b) {
+                       return a.dimIndex < b.dimIndex;
+                     });
 
   auto newOffset = mulOpFoldResult(lhsState.offset, rhsState.offset, loc,
                                    builder, builder.getIndexType());
@@ -686,24 +689,70 @@ LogicalResult PtrState::addState(PtrState &lhsState, PtrState &rhsState,
 }
 
 triton::AddPtrOp PtrState::createAddPtrOp(OpBuilder &builder, Location loc) {
-  // Tile shape after the (implicit) permute: block sizes reordered by
-  // permuteIds (identity when no permute is applied).
+  // Data-dependent offset tensors (tt.load results) force a full-rank tile:
+  // every axis of the (permuted) block shape appears in the addptr and the
+  // data tensors are broadcast-added afterwards. Without them the tile is
+  // reduced-rank: zero-stride (pure broadcast) axes are dropped, matching the
+  // legacy affine path consumed by materializeImplicitBroadcast.
+  const bool hasDataOffsets = !dynamicOffsets.empty();
+
   SmallVector<int64_t> tensorSizes;
-  for (auto id : permuteIds) {
-    auto sizeVal = getIntAttr(sizes[id]);
-    if (!sizeVal.has_value()) {
-      LLVM_DEBUG({
-        InFlightDiagnostic diag =
-            emitError(loc) << "PtrAnalysis: dynamic block size is not "
-                              "supported when rebuilding the addptr";
-      });
-      return nullptr;
+  SmallVector<OpFoldResult> tensorStrides;
+
+  auto emitDynamicSizeError = [&]() -> triton::AddPtrOp {
+    LLVM_DEBUG({
+      InFlightDiagnostic diag =
+          emitError(loc) << "PtrAnalysis: dynamic block size is not "
+                            "supported when rebuilding the addptr";
+    });
+    return nullptr;
+  };
+
+  if (!hasDataOffsets) {
+    // Legacy affine path: skip zero-stride axes, build a reduced-rank addptr.
+    for (auto id : permuteIds) {
+      auto info = stateInfo[id];
+      if (isZero(info.stride))
+        continue;
+      tensorStrides.emplace_back(info.stride);
+      tensorSizes.emplace_back(getIntAttr(info.shape).value());
     }
-    tensorSizes.emplace_back(sizeVal.value());
+  } else {
+    // Data path: full-rank tile. Axes with an affine/data entry in stateInfo
+    // use its shape; axes that only exist in the original block sizes (e.g. a
+    // data-only state whose stateInfo is empty) fall back to sizes. Note that
+    // sizes may be shorter than stateInfo (div/rem axis splits), hence the
+    // bounds check.
+    if (!permuteIds.empty()) {
+      for (size_t id : permuteIds) {
+        auto info = stateInfo[id];
+        auto shape = getIntAttr(info.shape);
+        if (shape.has_value()) {
+          tensorSizes.emplace_back(shape.value());
+          tensorStrides.emplace_back(info.stride);
+        } else {
+          auto sizeVal = id < sizes.size() ? getIntAttr(sizes[id])
+                                           : std::nullopt;
+          if (!sizeVal.has_value())
+            return emitDynamicSizeError();
+          tensorSizes.emplace_back(sizeVal.value());
+          tensorStrides.emplace_back(builder.getIndexAttr(0));
+        }
+      }
+    } else {
+      // Data-only state: the whole tile comes from the original block sizes.
+      for (auto s : sizes) {
+        auto sizeVal = getIntAttr(s);
+        if (!sizeVal.has_value())
+          return emitDynamicSizeError();
+        tensorSizes.emplace_back(sizeVal.value());
+        tensorStrides.emplace_back(builder.getIndexAttr(0));
+      }
+    }
   }
 
   // load a scalar pointer
-  if (tensorSizes.empty()) {
+  if (tensorSizes.empty() && !hasDataOffsets) {
     Value offsetValue = materializeValue(builder, loc, offset);
     if (offsetValue.getType().isIndex()) {
       offsetValue = builder.create<arith::IndexCastOp>(
@@ -723,23 +772,23 @@ triton::AddPtrOp PtrState::createAddPtrOp(OpBuilder &builder, Location loc) {
   // (pure broadcast) and data-dependent axes (tensor stride, rebuilt from
   // dynamicOffsets below) are skipped.
   SmallVector<Value> cachedRange;
-  for (size_t i = 0; i < tensorSizes.size(); ++i) {
-    auto info = stateInfo[permuteIds[i]];
-    if (isZero(info.stride))
-      continue;
-    if (auto strideVal = dyn_cast<Value>(info.stride)) {
+  auto emitAffineRange = [&](const OpFoldResult &stride,
+                             size_t tilePos) -> void {
+    if (isZero(stride))
+      return;
+    if (auto strideVal = dyn_cast<Value>(stride)) {
       if (isa<RankedTensorType>(strideVal.getType()))
-        continue; // data axis
+        return; // data axis
     }
 
     // make range
     auto indexI32RowType =
-        RankedTensorType::get({tensorSizes[i]}, builder.getI32Type());
+        RankedTensorType::get({tensorSizes[tilePos]}, builder.getI32Type());
     Value makeRangeOp = builder.create<triton::MakeRangeOp>(
-        loc, indexI32RowType, 0, tensorSizes[i]);
+        loc, indexI32RowType, 0, tensorSizes[tilePos]);
 
     // multiply stride
-    Value strideValue = materializeValue(builder, loc, info.stride);
+    Value strideValue = materializeValue(builder, loc, stride);
     if (strideValue.getType().isIndex()) {
       strideValue = builder.create<arith::IndexCastOp>(
           loc, builder.getI32Type(), strideValue);
@@ -749,10 +798,10 @@ triton::AddPtrOp PtrState::createAddPtrOp(OpBuilder &builder, Location loc) {
     auto rangeAfterMul =
         builder.create<arith::MulIOp>(loc, makeRangeOp, splatStride);
 
-    // reshape to the tile rank at position i
+    // reshape to the tile rank at position tilePos
     Value expandedValue = rangeAfterMul;
     for (size_t j = 0; j < tensorSizes.size(); ++j) {
-      if (j == i)
+      if (j == tilePos)
         continue;
       expandedValue =
           builder.create<triton::ExpandDimsOp>(loc, expandedValue, j);
@@ -762,6 +811,14 @@ triton::AddPtrOp PtrState::createAddPtrOp(OpBuilder &builder, Location loc) {
     auto broadcastValue =
         builder.create<triton::BroadcastOp>(loc, broadCastType, expandedValue);
     cachedRange.push_back(broadcastValue);
+  };
+
+  if (!hasDataOffsets) {
+    for (size_t i = 0; i < tensorStrides.size(); ++i)
+      emitAffineRange(tensorStrides[i], i);
+  } else {
+    for (size_t i = 0; i < permuteIds.size(); ++i)
+      emitAffineRange(stateInfo[permuteIds[i]].stride, i);
   }
 
   // combine the affine ranges (start from zero when every axis is either a
@@ -789,9 +846,18 @@ triton::AddPtrOp PtrState::createAddPtrOp(OpBuilder &builder, Location loc) {
         break;
       }
     }
+    // Full original block layout (ordered by dimIndex): affine/data axes use
+    // their stateInfo shape, remaining dims fall back to the original block
+    // sizes. The data tensors are broadcast to this layout and then transposed
+    // into the (permuted) tile layout.
     SmallVector<int64_t> origSizes;
-    for (auto s : sizes) {
-      auto v = getIntAttr(s);
+    const size_t fullRank = std::max(permuteIds.size(), sizes.size());
+    for (size_t d = 0; d < fullRank; ++d) {
+      std::optional<int64_t> v;
+      if (d < permuteIds.size())
+        v = getIntAttr(stateInfo[d].shape);
+      if (!v.has_value() && d < sizes.size())
+        v = getIntAttr(sizes[d]);
       if (!v.has_value()) {
         LLVM_DEBUG({
           InFlightDiagnostic diag =
@@ -1539,7 +1605,8 @@ LogicalResult PtrAnalysis::visitOperand(Value operand, PtrState &state,
     return visitOperandExtSI(op, state, loc, builder);
   } else if (auto op = operand.getDefiningOp<triton::LoadOp>()) {
     auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
-    if (tensorType && tensorType.getElementType().isIntOrIndex()) {
+    if (enableDataTensorOffset && tensorType &&
+        tensorType.getElementType().isIntOrIndex()) {
       return visitOperandDataTensor(operand, state, loc, builder);
     }
     LLVM_DEBUG({
