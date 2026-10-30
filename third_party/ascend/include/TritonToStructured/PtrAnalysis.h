@@ -62,6 +62,11 @@ struct PtrState {
   Value source;        // base address (ptr), maintained with visitOps
   OpFoldResult offset; // scalar offset (int), maintained with visitOps
 
+  // Each element is a rank-N integer tensor (usually the result of a tt.load);
+  // semantically addr = affine_part + Σ dynamicOffsets_k, treated as opaque,
+  // its operands are not recursed into.
+  SmallVector<Value> dynamicOffsets;
+
   // whether the record needs to be processed in the current pass, when ignore
   // is true, it indicates that this scenario should not be processed within the
   // current pass
@@ -143,6 +148,9 @@ public:
   LogicalResult visitOperandExpandDims(triton::ExpandDimsOp expandDimsOp,
                                        PtrState &state, const Location loc,
                                        OpBuilder &builder);
+
+  LogicalResult visitOperandDataTensor(Value operand, PtrState &state,
+                                       const Location loc, OpBuilder &builder);
 
   LogicalResult visitOperandConstSplat(arith::ConstantOp op, PtrState &state,
                                        const Location loc, OpBuilder &builder);

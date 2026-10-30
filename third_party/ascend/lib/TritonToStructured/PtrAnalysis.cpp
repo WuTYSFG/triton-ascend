@@ -128,6 +128,10 @@ void PtrState::dump() const {
   llvm::dbgs() << "PtrState: \n";
   llvm::dbgs() << "source:" << source << "\n";
   llvm::dbgs() << "scalar:" << offset << "\n";
+  llvm::dbgs() << "dynamicOffsets: [";
+  for (auto data : dynamicOffsets)
+    llvm::dbgs() << data << ", ";
+  llvm::dbgs() << "]\n";
   llvm::dbgs() << "size: [";
   for (auto size : sizes)
     llvm::dbgs() << size << ", ";
@@ -155,10 +159,12 @@ void PtrState::dump() const {
 }
 
 bool PtrState::isEmpty() const {
-  return (stateInfo.empty() && !source && !offset);
+  return (stateInfo.empty() && !source && !offset && dynamicOffsets.empty());
 }
 
 bool PtrState::isScalar() const {
+  if (!dynamicOffsets.empty())
+    return false;
   bool scalar = true;
   for (auto info : stateInfo) {
     auto staticStride = getIntAttr(info.stride);
@@ -896,6 +902,34 @@ PtrAnalysis::visitOperandBroadcast(triton::BroadcastOp broadcastOp,
   return success();
 }
 
+LogicalResult PtrAnalysis::visitOperandDataTensor(Value operand, PtrState &state,
+                                                  const Location loc,
+                                                  OpBuilder &builder) {
+  if (!state.isEmpty()) {
+    LLVM_DEBUG({
+      if (auto op = operand.getDefiningOp())
+        op->emitError(
+            "PtrAnalysis: PtrState should be empty when visiting data tensor");
+    });
+    return failure();
+  }
+
+  auto tensorType = cast<RankedTensorType>(operand.getType());
+  SmallVector<OpFoldResult> newSizes;
+  for (int64_t dim : tensorType.getShape())
+    newSizes.emplace_back(builder.getIndexAttr(dim));
+
+  state.sizes = newSizes;
+  state.dynamicOffsets.push_back(operand);
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "After visitOperandDataTensor: \n";
+    state.dump();
+    llvm::dbgs() << "----------------------------------------------\n";
+  });
+  return success();
+}
+
 LogicalResult PtrAnalysis::visitOperandSplat(triton::SplatOp splatOp,
                                              PtrState &state,
                                              const Location loc,
@@ -1356,6 +1390,10 @@ LogicalResult PtrAnalysis::visitOperand(Value operand, PtrState &state,
   } else if (auto op = operand.getDefiningOp<arith::ExtSIOp>()) {
     return visitOperandExtSI(op, state, loc, builder);
   } else if (auto op = operand.getDefiningOp<triton::LoadOp>()) {
+    auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
+    if (tensorType && tensorType.getElementType().isIntOrIndex()) {
+      return visitOperandDataTensor(operand, state, loc, builder);
+    }
     LLVM_DEBUG({
       op.emitRemark("TritonToStructured: Invalid dynamic offset"
                     "The load operation's offset cannot be derived from "
