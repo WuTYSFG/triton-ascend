@@ -347,6 +347,14 @@ LoadBroadcastConverter::matchAndRewrite(triton::LoadOp loadOp,
     return success();
   }
 
+  // FIXME: do not supported shape mismatch temporarily before we have
+  // a better way to handle broadcast discret mask in select
+  return failure();
+
+  // Loads tagged DiscreteMemAccess are kept as the discrete-memory
+  // representative load; do not split them into broadcast + load + select.
+  if (loadOp->hasAttr(ConverterUtils::mixCompileAxisDiscreteMaskAttrName))
+    return failure();
   auto newLoad = rewriter.create<triton::LoadOp>(
       loc, smallPtr, /*mask=*/nullptr, /*other=*/nullptr, cache, evict,
       isVolatile);

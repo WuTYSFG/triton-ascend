@@ -366,8 +366,7 @@ void normalizeDiscreteMaskAccessForFallback(MemAccOpTy &op,
   ptrOffsetInfo.setUnstructured(ptrOffsetInfo.getRank());
 }
 
-// ======================== 950 template-SIMT indirect fast-path lowering
-// ========================
+// =============== 950 template-SIMT indirect fast-path lowering ========================
 // Load/store uses the established indirect-template ABI when its rank and
 // pointer requirements are met. Atomic operations use the same gate with their
 // indirect custom-op lowering. Other cases fall back to scalar-loop lowering.
@@ -495,6 +494,279 @@ LogicalResult tryRewriteIndirectFastPath(MemAccOpTy op, Location loc,
     });
     return success();
   }
+}
+
+// Locate `slt make_range(0, K) <bound>` or its `sgt <bound> make_range(0, K)`
+// mirror inside the andi tree of the axis-discrete mask. Returns the bound
+// operand when such a row prefix exists.
+static std::optional<Value> findRowPrefixBound(Value mask, int64_t kCount) {
+  if (auto andOp = mask.getDefiningOp<arith::AndIOp>()) {
+    if (auto lhs = findRowPrefixBound(andOp.getLhs(), kCount))
+      return lhs;
+    return findRowPrefixBound(andOp.getRhs(), kCount);
+  }
+  if (auto bcast = mask.getDefiningOp<triton::BroadcastOp>()) {
+    Value src = bcast.getSrc();
+    if (auto expand = src.getDefiningOp<triton::ExpandDimsOp>())
+      src = expand.getSrc();
+    return findRowPrefixBound(src, kCount);
+  }
+  auto cmp = mask.getDefiningOp<arith::CmpIOp>();
+  if (!cmp)
+    return std::nullopt;
+  auto pred = cmp.getPredicate();
+  if (pred != arith::CmpIPredicate::slt &&
+      pred != arith::CmpIPredicate::sgt)
+    return std::nullopt;
+
+  auto kOp = cmp.getLhs().getDefiningOp<triton::MakeRangeOp>();
+  bool kIsLhs = true;
+  if (!kOp) {
+    kOp = cmp.getRhs().getDefiningOp<triton::MakeRangeOp>();
+    kIsLhs = false;
+  }
+  auto kType =
+      kOp ? dyn_cast<RankedTensorType>(kOp.getType()) : RankedTensorType();
+  if (!kType || kType.getRank() != 1 || kType.getShape()[0] != kCount ||
+      kOp.getStart() != 0)
+    return std::nullopt;
+
+  if ((pred == arith::CmpIPredicate::slt && kIsLhs) ||
+      (pred == arith::CmpIPredicate::sgt && !kIsLhs))
+    return kIsLhs ? cmp.getRhs() : cmp.getLhs();
+  return std::nullopt;
+}
+
+// Materialize the index-typed row-loop bound from the `k < topk` prefix,
+// clamped to K. Without a recoverable prefix the full row count is used, so
+// every row is visited and the row predicate decides load vs. fill.
+static Value getRowLoopBound(Value mask, int64_t kCount, Location loc,
+                             PatternRewriter &rewriter) {
+  auto indexType = rewriter.getIndexType();
+  Value kBound =
+      rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(kCount));
+  auto prefix = findRowPrefixBound(mask, kCount);
+  if (!prefix)
+    return kBound;
+
+  Value bound = *prefix;
+  // Normalize a tensor bound back to its scalar value when it is a splat or a
+  // uniform constant; other forms cannot safely drive the trip count.
+  if (auto boundType = dyn_cast<RankedTensorType>(bound.getType())) {
+    if (auto splatOp = bound.getDefiningOp<triton::SplatOp>()) {
+      bound = splatOp.getSrc();
+    } else if (auto constOp = bound.getDefiningOp<arith::ConstantOp>()) {
+      auto splatAttr = dyn_cast_or_null<SplatElementsAttr>(constOp.getValue());
+      if (!splatAttr)
+        return kBound;
+      auto splatVal = dyn_cast<TypedAttr>(splatAttr.getSplatValue<Attribute>());
+      if (!splatVal)
+        return kBound;
+      bound = rewriter.create<arith::ConstantOp>(loc, splatVal);
+    } else {
+      return kBound;
+    }
+  }
+  if (bound.getType() == indexType)
+    return rewriter.create<arith::MinSIOp>(loc, bound, kBound);
+  if (!isa<IntegerType>(bound.getType()))
+    return kBound;
+  bound = rewriter.create<arith::IndexCastOp>(loc, indexType, bound);
+  return rewriter.create<arith::MinSIOp>(loc, bound, kBound);
+}
+
+// Rewrite load tagged MixCompileAxisDiscreteMask whose pointer is structurally
+// continuous into a loop of contiguous masked loads:
+//   scf.for i in [0, bound) iter_args(acc = splat other) {
+//     rowPred = tensor.extract discMask[i, 0]
+//     rowPtr  = splat(tensor.extract ptr[i, 0]) + expand_dims(make_range(0, G))
+//     row     = scf.if rowPred { tt.load rowPtr, mask=contMask } else { other }
+//     acc     = tensor.insert_slice row into acc[i, 0]
+//   }
+static LogicalResult rewriteAxisDiscreteMaskLoad(triton::LoadOp op,
+                                                 const PtrOffsetInfo &ptrOffsetInfo,
+                                                 PatternRewriter &rewriter) {
+  auto loc = op.getLoc();
+  auto ptrType = dyn_cast<RankedTensorType>(op.getPtr().getType());
+  auto maskType = dyn_cast<RankedTensorType>(op.getMask().getType());
+  if (!ptrType || !maskType || ptrType.getRank() != 2)
+    return failure();
+  auto shape = ptrType.getShape();
+  if (shape[0] <= 0 || shape[1] <= 0 || maskType.getShape() != shape)
+    return failure();
+  if (ptrOffsetInfo.getRank() != 2)
+    return failure();
+
+  const auto &axes = ptrOffsetInfo.getStructured();
+  if (axes[1] != PtrOffsetInfo::AxisInfo::structured &&
+      axes[1] != PtrOffsetInfo::AxisInfo::scalar)
+    return failure();
+
+  Value scalarBase = ptrOffsetInfo.getPtr();
+  Value rowOff = ptrOffsetInfo.getOffset();
+  if (!scalarBase || !isa<triton::PointerType>(scalarBase.getType()) ||
+      !rowOff)
+    return failure();
+  if (auto offsetType = dyn_cast<RankedTensorType>(rowOff.getType())) {
+    if (offsetType.getRank() != ptrOffsetInfo.getRank() ||
+        !isa<IntegerType>(offsetType.getElementType()))
+      return failure();
+  } else if (!rowOff.getType().isIndex() &&
+             !isa<IntegerType>(rowOff.getType())) {
+    return failure();
+  }
+
+  auto elemType = getResultElementType(ptrType);
+  int64_t gCount = shape[1];
+
+  Value other = op.getOther();
+  // `other` of a masked load is typically a full-shape splat constant tensor. 
+  // Reduce it to its scalar value so the row loop only ever splats a scalar.
+  bool otherIsTensor = other && isa<RankedTensorType>(other.getType());
+  if (other) {
+    if (auto constOp = other.getDefiningOp<arith::ConstantOp>()) {
+      auto splatAttr = dyn_cast_or_null<SplatElementsAttr>(constOp.getValue());
+      if (splatAttr) {
+        auto splatVal =
+            dyn_cast<TypedAttr>(splatAttr.getSplatValue<Attribute>());
+        if (splatVal) {
+          other = rewriter.create<arith::ConstantOp>(loc, splatVal);
+          otherIsTensor = false;
+        }
+      }
+    }
+  } else {
+    auto otherOrFailure =
+        specializeTypelessValueToConstant(TypelessValue::Zero, elemType, loc,
+                                          rewriter);
+    if (failed(otherOrFailure))
+      llvm_unreachable("Unsupported type for constant creation");
+    other = *otherOrFailure;
+  }
+
+  auto [contMask, discMask] = decomposeAndMask(op.getMask(), loc, rewriter);
+  if (!discMask)
+    return failure();
+
+  auto indexType = rewriter.getIndexType();
+  Value c0 = rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(0));
+  Value c1 = rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(1));
+  Value bound = getRowLoopBound(op.getMask(), shape[0], loc, rewriter);
+
+  Value fill;
+  if (otherIsTensor)
+    fill = other;
+  else
+    fill = rewriter.create<triton::SplatOp>(
+        loc, RankedTensorType::get(shape, elemType), other);
+  auto forOp =
+      rewriter.create<scf::ForOp>(loc, c0, bound, c1, ValueRange({fill}));
+  Value acc = forOp.getRegionIterArg(0);
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(forOp.getBody());
+    Value iv = forOp.getInductionVar();
+
+    Value rowMask = rewriter.create<tensor::ExtractOp>(
+          loc, discMask, ValueRange{iv, c0});
+
+    // Rebuild the contiguous row pointer from the scalar row base and the
+    // g-axis offsets. The row base is the analyzed scalar pointer plus the
+    // row's numerical offset; only that offset is extracted from a tensor.
+    Value rowOffValue = rowOff;
+    if (isa<RankedTensorType>(rowOff.getType())) {
+      auto rowOffExtract = rewriter.create<tensor::ExtractOp>(
+          loc, rowOff, ValueRange{iv, c0});
+      rowOffExtract->setAttr(ConverterUtils::discreteAttrName,
+                             UnitAttr::get(rewriter.getContext()));
+      rowOffValue = rowOffExtract.getResult();
+    }
+    Value rowBase = rewriter.create<triton::AddPtrOp>(loc, scalarBase.getType(),
+                                                      scalarBase, rowOffValue);
+    auto rowPtrType =
+        RankedTensorType::get({1, gCount}, scalarBase.getType());
+    auto rowGType =
+        RankedTensorType::get({gCount}, rewriter.getIntegerType(32));
+    Value rowG = rewriter.create<triton::MakeRangeOp>(loc, rowGType, 0, gCount);
+    Value rowG2d = rewriter.create<triton::ExpandDimsOp>(loc, rowG, 0);
+    Value rowBase2d = rewriter.create<triton::SplatOp>(loc, rowPtrType, rowBase);
+    Value rowPtr =
+        rewriter.create<triton::AddPtrOp>(loc, rowPtrType, rowBase2d, rowG2d);
+
+    Value rowContMask = nullptr;
+    if (contMask) {
+      if (auto bcast = contMask.getDefiningOp<triton::BroadcastOp>()) {
+        auto srcType = dyn_cast<RankedTensorType>(bcast.getSrc().getType());
+        if (srcType && srcType.getShape() == ArrayRef<int64_t>{1, gCount})
+          rowContMask = bcast.getSrc();
+      }
+      if (!rowContMask) {
+        SmallVector<OpFoldResult> sliceOffsets = {iv, c0};
+        SmallVector<OpFoldResult> sliceSizes = {rewriter.getIndexAttr(1),
+                                                rewriter.getIndexAttr(gCount)};
+        SmallVector<OpFoldResult> sliceStrides = {rewriter.getIndexAttr(1),
+                                                  rewriter.getIndexAttr(1)};
+        rowContMask = rewriter.create<tensor::ExtractSliceOp>(
+            loc, contMask, sliceOffsets, sliceSizes, sliceStrides);
+      }
+    }
+
+    auto ifOp = rewriter.create<scf::IfOp>(
+        loc, rowMask,
+        [&](OpBuilder &b, Location loc) {
+          Value rowLoad;
+          if (rowContMask) {
+            Value rowLoadOther = other;
+            if (otherIsTensor) {
+              SmallVector<OpFoldResult> sliceOffsets = {iv, c0};
+              SmallVector<OpFoldResult> sliceSizes = {b.getIndexAttr(1),
+                                                      b.getIndexAttr(gCount)};
+              SmallVector<OpFoldResult> sliceStrides = {b.getIndexAttr(1),
+                                                        b.getIndexAttr(1)};
+              rowLoadOther = b.create<tensor::ExtractSliceOp>(
+                  loc, other, sliceOffsets, sliceSizes, sliceStrides);
+            }
+            rowLoad = b.create<triton::LoadOp>(
+                loc, rowPtr, rowContMask, rowLoadOther, op.getCache(),
+                op.getEvict(), op.getIsVolatile());
+          } else {
+            rowLoad = b.create<triton::LoadOp>(
+                loc, rowPtr, op.getCache(), op.getEvict(), op.getIsVolatile());
+          }
+
+          rowLoad->setAttr(ConverterUtils::discreteAttrName,
+                           UnitAttr::get(rewriter.getContext()));
+          b.create<scf::YieldOp>(loc, rowLoad.getResult());
+        },
+        [&](OpBuilder &b, Location loc) {
+          Value rowOther;
+          if (otherIsTensor) {
+            SmallVector<OpFoldResult> sliceOffsets = {iv, c0};
+            SmallVector<OpFoldResult> sliceSizes = {b.getIndexAttr(1),
+                                                    b.getIndexAttr(gCount)};
+            SmallVector<OpFoldResult> sliceStrides = {b.getIndexAttr(1),
+                                                      b.getIndexAttr(1)};
+            rowOther = b.create<tensor::ExtractSliceOp>(
+                loc, other, sliceOffsets, sliceSizes, sliceStrides);
+          } else {
+            auto rowType = RankedTensorType::get({1, gCount}, elemType);
+            rowOther = b.create<triton::SplatOp>(loc, rowType, other);
+          }
+          b.create<scf::YieldOp>(loc, rowOther);
+        });
+    Value row = ifOp.getResult(0);
+
+    SmallVector<OpFoldResult> offsets = {iv, c0};
+    SmallVector<OpFoldResult> sizes = {rewriter.getIndexAttr(1),
+                                       rewriter.getIndexAttr(gCount)};
+    SmallVector<OpFoldResult> strides = {rewriter.getIndexAttr(1),
+                                         rewriter.getIndexAttr(1)};
+    Value newAcc = rewriter.create<tensor::InsertSliceOp>(
+        loc, row, acc, offsets, sizes, strides);
+    rewriter.create<scf::YieldOp>(loc, newAcc);
+  }
+  rewriter.replaceOp(op, forOp.getResult(0));
+  return success();
 }
 
 } // namespace
@@ -796,6 +1068,22 @@ LogicalResult UnstructuredMemAccessConverter<MemAccOpTy>::matchAndRewrite(
     return op.emitError() << "PtrOffsetInfo should be computed\n" << ptr;
 
   auto ptrOffsetInfo = offsetMap.at(ptr);
+
+  // Axis-discrete mask load: the mask is discrete only along a single axis. 
+  // When the pointer's trailing axis is structurally continuous, rewrite the 
+  // load into a row loop of contiguous accesses. Otherwise drop the tag and 
+  // route through the ordinary discrete path (SIMT template / scalar loop), 
+  // exactly like MixCompileDiscreteMask loads.
+  if (op->hasAttr(ConverterUtils::mixCompileAxisDiscreteMaskAttrName)) {
+    if constexpr (std::is_same_v<MemAccOpTy, triton::LoadOp>) {
+      if (succeeded(rewriteAxisDiscreteMaskLoad(op, ptrOffsetInfo, rewriter)))
+        return success();
+    }
+    op->removeAttr(ConverterUtils::mixCompileAxisDiscreteMaskAttrName);
+    op->setAttr(ConverterUtils::mixCompileDiscreteMaskAttrName,
+                rewriter.getUnitAttr());
+    mixCompileDiscreteMask = true;
+  }
 
   // Handle these accesses before any speculative fallback IR is created.
   // A failed match must leave the original operation intact for the final
