@@ -505,8 +505,14 @@ LogicalResult PtrState::mulState(const PtrState &lhsState,
                        return a.dimIndex < b.dimIndex;
                      });
 
-  auto newOffset = mulOpFoldResult(lhsState.offset, rhsState.offset, loc,
-                                   builder, builder.getIndexType());
+  // A pure data-dependent operand carries no scalar offset (visitOperandDataTensor
+  // only sets sizes + dynamicOffsets). In that case the scalar coefficient has
+  // already been folded into the data tensors above, so the product contributes
+  // no additive scalar offset.
+  OpFoldResult newOffset;
+  if (lhsState.offset && rhsState.offset)
+    newOffset = mulOpFoldResult(lhsState.offset, rhsState.offset, loc, builder,
+                                builder.getIndexType());
   updatePtrState(newStateInfo, lhs->sizes, lhs->source, newOffset, loc, builder,
                  lhs->shouldLinearize);
   this->dynamicOffsets = newDynamicOffsets;
@@ -547,8 +553,10 @@ LogicalResult PtrState::subState(const PtrState &lhsState,
     return failure();
   }
 
-  auto newOffset =
-      subOpFoldResult(lhsState.offset, rhsState.offset, loc, builder);
+  // A pure data-dependent lhs carries no scalar offset: skip the fold then.
+  OpFoldResult newOffset;
+  if (lhsState.offset && rhsState.offset)
+    newOffset = subOpFoldResult(lhsState.offset, rhsState.offset, loc, builder);
   updatePtrState(lhsState.stateInfo, lhsState.sizes, lhsState.source, newOffset,
                  loc, builder, lhsState.shouldLinearize);
 
@@ -880,11 +888,13 @@ triton::AddPtrOp PtrState::createAddPtrOp(OpBuilder &builder, Location loc) {
               builder.create<arith::IndexCastOp>(loc, i32DataType, dataTile);
         } else if (auto intTy = dyn_cast<IntegerType>(
                        dataType.getElementType())) {
-          dataTile = intTy.getWidth() < 32
-                         ? builder.create<arith::ExtSIOp>(loc, i32DataType,
-                                                          dataTile)
-                         : builder.create<arith::TruncIOp>(loc, i32DataType,
-                                                           dataTile);
+          if (intTy.getWidth() < 32) {
+            dataTile =
+                builder.create<arith::ExtSIOp>(loc, i32DataType, dataTile);
+          } else {
+            dataTile =
+                builder.create<arith::TruncIOp>(loc, i32DataType, dataTile);
+          }
         }
       }
       // broadcast to the original (dimIndex-ordered) block layout, then
@@ -903,16 +913,19 @@ triton::AddPtrOp PtrState::createAddPtrOp(OpBuilder &builder, Location loc) {
     }
   }
 
-  // addOffset
-  Value addValue = materializeValue(builder, loc, offset);
-  if (addValue.getType().isIndex()) {
-    addValue =
-        builder.create<arith::IndexCastOp>(loc, builder.getI32Type(), addValue);
+  // addOffset (a pure data-dependent state may carry no scalar offset)
+  Value rangeAfterAdd = rangeAfterCombine;
+  if (offset) {
+    Value addValue = materializeValue(builder, loc, offset);
+    if (addValue.getType().isIndex()) {
+      addValue =
+          builder.create<arith::IndexCastOp>(loc, builder.getI32Type(), addValue);
+    }
+    Value splatOffset =
+        builder.create<triton::SplatOp>(loc, broadCastType, addValue);
+    rangeAfterAdd =
+        builder.create<arith::AddIOp>(loc, rangeAfterCombine, splatOffset);
   }
-  Value splatOffset =
-      builder.create<triton::SplatOp>(loc, broadCastType, addValue);
-  auto rangeAfterAdd =
-      builder.create<arith::AddIOp>(loc, rangeAfterCombine, splatOffset);
 
   // addPtr
   Value splatPtr = builder.create<triton::SplatOp>(loc, ptrTensorType, source);
