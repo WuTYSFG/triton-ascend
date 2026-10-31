@@ -855,15 +855,19 @@ triton::AddPtrOp PtrState::createAddPtrOp(OpBuilder &builder, Location loc) {
       }
     }
     // Full original block layout (ordered by dimIndex): affine/data axes use
-    // their stateInfo shape, remaining dims fall back to the original block
-    // sizes. The data tensors are broadcast to this layout and then transposed
-    // into the (permuted) tile layout.
+    // their stateInfo shape keyed by dimIndex, remaining dims fall back to the
+    // original block sizes. The data tensors are broadcast to this layout and
+    // then transposed into the (permuted) tile layout.
     SmallVector<int64_t> origSizes;
     const size_t fullRank = std::max(permuteIds.size(), sizes.size());
     for (size_t d = 0; d < fullRank; ++d) {
       std::optional<int64_t> v;
-      if (d < permuteIds.size())
-        v = getIntAttr(stateInfo[d].shape);
+      for (const auto &info : stateInfo) {
+        if (info.dimIndex == d) {
+          v = getIntAttr(info.shape);
+          break;
+        }
+      }
       if (!v.has_value() && d < sizes.size())
         v = getIntAttr(sizes[d]);
       if (!v.has_value()) {
@@ -1741,8 +1745,15 @@ void PtrState::analyzePermute() {
     return true;
   };
 
+  // Broadcast-only axes (stride == 0, not referenced by the address) have no
+  // place in the affine stride ordering: Treat them as the largest stride so 
+  // they sort to the outermost position instead.
   std::stable_sort(permuteIds.begin(), permuteIds.end(),
                    [&](size_t a, size_t b) {
+                     bool za = isZero(stateInfo[a].stride);
+                     bool zb = isZero(stateInfo[b].stride);
+                     if (za || zb)
+                       return za && !zb;
                      return isGreater(stateInfo[a].stride, stateInfo[b].stride);
                    });
 
