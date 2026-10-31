@@ -1628,6 +1628,17 @@ LogicalResult PtrAnalysis::visitOperand(Value operand, PtrState &state,
                     "another load result.");
     });
     return failure();
+  } else if (auto op = operand.getDefiningOp<arith::SelectOp>()) {
+    auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
+    if (enableDataTensorOffset && tensorType &&
+        tensorType.getElementType().isIntOrIndex()) {
+      return visitOperandDataTensor(operand, state, loc, builder);
+    }
+    LLVM_DEBUG({
+      op.emitRemark("TritonToStructured: Invalid dynamic offset"
+                    "The select result cannot be used as a dynamic offset.");
+    });
+    return failure();
   } else if (auto op = operand.getDefiningOp<arith::FPToSIOp>()) {
     LLVM_DEBUG({
       op.emitWarning("IllegalTypeConversionInAddressCalculation"
