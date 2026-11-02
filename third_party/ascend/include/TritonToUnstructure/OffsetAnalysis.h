@@ -219,6 +219,10 @@ void parseExpandDims(triton::ExpandDimsOp op, const Location &loc,
                      RewriterBase &rewriter,
                      llvm::DenseMap<Value, PtrOffsetInfo> &offsetMap);
 
+void parseTrans(triton::TransOp op, const Location &loc,
+                RewriterBase &rewriter,
+                llvm::DenseMap<Value, PtrOffsetInfo> &offsetMap);
+
 void parseReshape(triton::ReshapeOp op, const Location &loc,
                   RewriterBase &rewriter,
                   llvm::DenseMap<Value, PtrOffsetInfo> &offsetMap);

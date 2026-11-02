@@ -632,6 +632,8 @@ void parseTritonOp(Operation *tritonOp, const Location &loc,
     parseBroadcast(broadcastOp, loc, rewriter, offsetMap);
   } else if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(tritonOp)) {
     parseExpandDims(expandDimsOp, loc, rewriter, offsetMap);
+  } else if (auto transOp = dyn_cast<triton::TransOp>(tritonOp)) {
+    parseTrans(transOp, loc, rewriter, offsetMap);
   } else if (auto reshapeOp = dyn_cast<triton::ReshapeOp>(tritonOp)) {
     parseReshape(reshapeOp, loc, rewriter, offsetMap);
   } else if (auto clampFOp = dyn_cast<triton::ClampFOp>(tritonOp)) {
@@ -1179,6 +1181,43 @@ void parseExpandDims(triton::ExpandDimsOp op, const Location &loc,
       dstStructured[i] = srcStructured[j];
       j++;
     }
+}
+
+void parseTrans(triton::TransOp op, const Location &loc,
+                RewriterBase &rewriter,
+                llvm::DenseMap<Value, PtrOffsetInfo> &offsetMap) {
+  // Get trans src
+  auto src = op.getSrc();
+  parse(src, op.getLoc(), rewriter, offsetMap);
+  PtrOffsetInfo srcOffsetInfo = offsetMap.at(src);
+  auto &srcStructured = srcOffsetInfo.getStructuredRef();
+  // Set trans offset map
+  auto dst = op.getResult();
+  auto dstType = cast<RankedTensorType>(dst.getType());
+  auto order = op.getOrder();
+  assert(order.size() == static_cast<size_t>(dstType.getRank()) &&
+         "order size should be equal to dst rank");
+  assert(order.size() == srcStructured.size() &&
+         "order size should be equal to src rank");
+  offsetMap[dst] = PtrOffsetInfo(srcOffsetInfo.getPtr());
+  offsetMap[dst].setScalarLike(srcOffsetInfo.isScalarLike());
+  offsetMap[dst].setPointerDescriptorOwned(
+      srcOffsetInfo.isPointerDescriptorOwned());
+  if (srcOffsetInfo.getPtr()) {
+    RewriterBase::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(op);
+    Value valueOffset = srcOffsetInfo.getOffset();
+    // Transpose the offset to the dst axis layout so the later per-axis
+    // combine (e.g. arith.addi in parseAddPtr) matches shapes.
+    Value offset = rewriter.create<triton::TransOp>(
+        loc, valueOffset, DenseI32ArrayAttr::get(op.getContext(), order));
+    offsetMap[dst].setOffset(offset);
+  }
+
+  auto &dstStructured = offsetMap[dst].getStructuredRef();
+  dstStructured.resize(srcStructured.size());
+  for (size_t i = 0; i < dstStructured.size(); i++)
+    dstStructured[i] = srcStructured[order[i]];
 }
 
 void parseReshape(triton::ReshapeOp op, const Location &loc,
