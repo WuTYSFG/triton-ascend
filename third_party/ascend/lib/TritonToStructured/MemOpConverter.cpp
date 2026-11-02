@@ -410,6 +410,10 @@ LogicalResult StoreConverter::matchAndRewrite(triton::StoreOp op,
 
 Value MemOpTransformer::materializeImplicitBroadcast(
     Value srcTensor, const Location loc, PatternRewriter &rewriter) {
+  // Data path emits a full-rank tile: zero-stride (broadcast) axes are already
+  // materialized at their permuted positions, so no extra broadcast is needed.
+  if (!ptrState.dynamicOffsets.empty())
+    return srcTensor;
   SmallVector<int64_t> broadCastIndex;
   SmallVector<int64_t> broadCastShape;
   for (auto [i, info] : llvm::enumerate(ptrState.stateInfo)) {
@@ -726,7 +730,7 @@ Value MemOpTransformer::createNewMask(Value oldMask, const Location loc,
     llvm::dbgs() << "MaskAnalysis: analyzing load/store mask.\n";
   });
 
-  if (!oldMask || maskState.analysisMask(oldMask).failed()) {
+  if (maskState.analysisMask(oldMask).failed()) {
     LLVM_DEBUG({
       llvm::dbgs() << "----------------------------------------------\n";
       llvm::dbgs() << "MaskAnalysis: no mask or failed to analyze mask.\n";
@@ -779,7 +783,10 @@ Value MemOpTransformer::createNewMask(Value oldMask, const Location loc,
                                         itMask->dimIndex, itMask->hasBroadCast,
                                         itMask->currentType, itMask->rhs);
 
-    if (!isZero(itPtr->stride)) {
+    // Data path emits a full-rank tile (zero-stride axes are kept), so the
+    // matching mask entry must be kept as well; otherwise applyPermuteOnMask
+    // fails the size check (permuteIds vs mask stateInfo).
+    if (!isZero(itPtr->stride) || !ptrState.dynamicOffsets.empty()) {
       newMaskInfo.emplace_back(newInfo);
     }
 
