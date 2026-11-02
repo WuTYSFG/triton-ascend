@@ -330,6 +330,13 @@ void BlockData::mulBlock(BlockData &lBlock, BlockData &rBlock, Location loc,
 
   assert(!(lBlock.hasSource() && rBlock.hasSource()));
 
+  // Keep the one-sided opaque source (e.g. an indexed tt.load / arith.select
+  // gather value) through the mul, mirroring addBlock. Otherwise a per-lane
+  // offset scaled by a constant loses its indirect-access provenance before a
+  // following extract_slice can consume it.
+  this->source =
+      lBlock.hasSource() ? lBlock.getSourceRef() : rBlock.getSourceRef();
+
   if (lBlock.isScalar() && rBlock.isScalar()) {
     LLVM_DEBUG({
       llvm::dbgs() << "lBlock.scalar:" << lBlock.getScalar()
@@ -954,14 +961,35 @@ LogicalResult BlockDataParser::parseExtractSlice(
     return failure();
   if (!srcBlock.hasSource())
     return op.emitOpError(scenarioMessages);
+  Operation *srcDefOp = srcBlock.getSource().getDefiningOp();
   // Use isa_and_nonnull for LLVM 21 compatibility
-  if (!isa_and_nonnull<triton::LoadOp>(srcBlock.getSource().getDefiningOp()))
+  bool srcIsLoad = isa_and_nonnull<triton::LoadOp>(srcDefOp);
+  bool srcIsSelect = isa_and_nonnull<arith::SelectOp>(srcDefOp);
+  if (!srcIsLoad && !srcIsSelect)
     return op.emitOpError(scenarioMessages);
 
   auto extract_result = op->getResult(0);
   auto shaped_ty = dyn_cast<RankedTensorType>(extract_result.getType());
   auto shape = shaped_ty.getShape();
-  if (shape.size() > 1 || shape[0] > 1)
+  if (shape.size() > 1 || shape[0] > 1) {
+    // Multi-element extract of an opaque gather chain (indexed load / select).
+    // The sliced tensor still carries the per-lane address values, so expose a
+    // zero-offset unstructured block and let the addptr/load conversion
+    // scalarize the surviving extract_slice values per lane. Scalarized or
+    // broadcast source dims need no explicit handling: the subscription has
+    // already been folded into the sliced tensor values.
+    if (!srcBlock.getMemAccType().isUnstructured())
+      return op.emitOpError(scenarioMessages);
+    assert(data.isEmpty());
+    for (int64_t dim : shape) {
+      data.getOffsetsRef().push_back(rewriter.getIndexAttr(0));
+      data.getSizesRef().push_back(rewriter.getIndexAttr(dim));
+      data.getStridesRef().push_back(rewriter.getIndexAttr(0));
+    }
+    data.setMemAccVal(MemAccVal::UnstrucMemAcc);
+    return success();
+  }
+  if (!srcIsLoad)
     return op.emitOpError(scenarioMessages);
   auto castOp = rewriter.create<arith::IndexCastOp>(
       loc, RankedTensorType::get(shape, rewriter.getIndexType()),
@@ -1556,10 +1584,22 @@ LogicalResult BlockDataParser::parseSelect(
 
     indexOfr = getOpFoldResultOfLayoutInfo(scalarSelect.getResult(), rewriter);
   } else {
-    if (!llvm::all_of(resType.getShape(), [](int64_t dim) { return dim == 1; }))
-      return op.emitOpError(
-          "BlockData select supports non-splat values only when every result "
-          "dimension is one");
+    if (!llvm::all_of(resType.getShape(),
+                      [](int64_t dim) { return dim == 1; })) {
+      // The select carries per-lane values which cannot be folded into a
+      // scalar here (e.g. tl.where built over an indexed tt.load). Keep the
+      // whole shaped result as an opaque gather source: subscripts stay in
+      // the tensor value and flow to a following extract_slice / addptr,
+      // where the unstructured memory-access path scalarizes them per lane.
+      data.setMemAccVal(MemAccVal::UnstrucMemAcc);
+      data.setSource(op.getResult());
+      for (int64_t dim : resType.getShape()) {
+        data.getOffsetsRef().push_back(rewriter.getIndexAttr(0));
+        data.getSizesRef().push_back(rewriter.getIndexAttr(dim));
+        data.getStridesRef().push_back(rewriter.getIndexAttr(0));
+      }
+      return success();
+    }
 
     SmallVector<Value> indices;
     indices.reserve(loopLimit);
