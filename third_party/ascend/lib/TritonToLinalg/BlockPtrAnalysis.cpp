@@ -662,6 +662,8 @@ BlockDataParser::parse(Value operand, BlockData &data, const Location &loc,
   } else if (auto expandDimsOp =
                  operand.getDefiningOp<triton::ExpandDimsOp>()) {
     return parseExpandDims(expandDimsOp, data, loc, rewriter, known);
+  } else if (auto transOp = operand.getDefiningOp<triton::TransOp>()) {
+    return parseTrans(transOp, data, loc, rewriter, known);
   } else if (auto remOp = operand.getDefiningOp<arith::RemSIOp>()) {
     return parseRem(remOp, data, loc, rewriter, known);
   } else if (auto bitcastOp = operand.getDefiningOp<triton::BitcastOp>()) {
@@ -892,6 +894,43 @@ LogicalResult BlockDataParser::parseExpandDims(
                             rewriter.getIndexAttr(1));
   data.getStridesRef().insert(data.getStridesRef().begin() + axis,
                               rewriter.getIndexAttr(0));
+  return success();
+}
+
+LogicalResult BlockDataParser::parseTrans(
+    triton::TransOp op, BlockData &data, const Location &loc,
+    ConversionPatternRewriter &rewriter,
+    const llvm::SmallDenseMap<Value, BlockData> &known) {
+  assert(data.isEmpty());
+
+  if (failed(parse(op.getSrc(), data, loc, rewriter, known)))
+    return failure();
+
+  auto resShape = dyn_cast<ShapedType>(op.getResult().getType()).getShape();
+  auto order = op.getOrder();
+  assert(order.size() == static_cast<size_t>(resShape.size()) &&
+         "order size should be equal to result rank");
+
+  // tt.trans permutes the axes: result axis i corresponds to source axis
+  // order[i]. Move the per-axis access facts (offset/size/stride) into the
+  // result layout so the block address stays consistent across the trans.
+  SmallVector<OpFoldResult> permutedOffsets;
+  SmallVector<OpFoldResult> permutedSizes;
+  SmallVector<OpFoldResult> permutedStrides;
+  permutedOffsets.reserve(order.size());
+  permutedSizes.reserve(order.size());
+  permutedStrides.reserve(order.size());
+  auto srcOffsets = data.getOffsets();
+  auto srcSizes = data.getSizes();
+  auto srcStrides = data.getStrides();
+  for (size_t i = 0; i < order.size(); ++i) {
+    permutedOffsets.push_back(srcOffsets[order[i]]);
+    permutedSizes.push_back(srcSizes[order[i]]);
+    permutedStrides.push_back(srcStrides[order[i]]);
+  }
+  data.setOffsets(permutedOffsets);
+  data.setSizes(permutedSizes);
+  data.setStrides(permutedStrides);
   return success();
 }
 

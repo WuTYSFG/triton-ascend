@@ -231,6 +231,11 @@ public:
                   const llvm::SmallDenseMap<Value, BlockData> &known);
 
   static LogicalResult
+  parseTrans(triton::TransOp op, BlockData &data, const Location &loc,
+             ConversionPatternRewriter &rewriter,
+             const llvm::SmallDenseMap<Value, BlockData> &known);
+
+  static LogicalResult
   parseBitcast(triton::BitcastOp op, BlockData &data, const Location &loc,
                ConversionPatternRewriter &rewriter,
                const llvm::SmallDenseMap<Value, BlockData> &known);
